@@ -1,3 +1,24 @@
+[project]
+name = "mosaic-tool"
+description = "画像にモザイクをかけるデスクトップアプリ"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+# バージョンは mosaic_tool/version.py を単一の情報源として参照する
+dynamic = ["version"]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# 配布は PyInstaller 製 exe のため、パッケージ探索対象は mosaic_tool のみに限定する
+packages = ["mosaic_tool"]
+
+[tool.setuptools.dynamic]
+version = { attr = "mosaic_tool.version.__version__" }
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # mosaic_tool パッケージと scripts/ 配下の開発用ツール(icon_assets)を tests から import できるようにする
