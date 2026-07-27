@@ -2,6 +2,8 @@
 
 画像の指定範囲にモザイクをかけるツール。
 
+https://github.com/user-attachments/assets/b727d54e-397f-4e7a-adb6-37318c6c51df
+
 ## 導入
 
 [Releases](https://github.com/kidonaru/MosaicTool/releases) から `MosaicTool-v<バージョン>-win-x64.zip` をダウンロードし、展開して `MosaicTool.exe` を実行します。インストールは不要です。
