@@ -1,0 +1,71 @@
+# 配布用 zip をビルドして GitHub Releases へアップロードするワークフロー
+#
+# - タグ push (v*) : zip をビルドし、そのタグの Release を作成してアップロードする
+# - 手動実行       : zip をビルドし、Actions の成果物 (Artifact) としてのみ残す
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write # Release の作成とアセットのアップロードに必要
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      # タグとの整合検証と Artifact 名に使う情報を取り出す
+      # 配布物のファイル名は scripts/package.ps1 が組み立てるため、ここでは作らない
+      - name: バージョン情報を取得
+        id: meta
+        shell: pwsh
+        run: |
+          $appName = (python -c "import mosaic_tool; print(mosaic_tool.APP_NAME)").Trim()
+          $appVersion = (python -c "import mosaic_tool; print(mosaic_tool.__version__)").Trim()
+          if (-not $appName -or -not $appVersion) {
+              throw "mosaic_tool/version.py からバージョン情報を取得できませんでした"
+          }
+          # タグ push の場合は mosaic_tool/version.py と食い違っていないか検証する
+          if ($env:GITHUB_REF -like "refs/tags/*") {
+              $tag = $env:GITHUB_REF -replace "^refs/tags/", ""
+              if ($tag -ne "v$appVersion") {
+                  throw "タグ ($tag) と mosaic_tool/version.py のバージョン (v$appVersion) が一致しません"
+              }
+          }
+          "app_name=$appName" >> $env:GITHUB_OUTPUT
+          "app_version=$appVersion" >> $env:GITHUB_OUTPUT
+
+      # Artifact 名に使う package_name は package.ps1 が GITHUB_OUTPUT へ書き出す
+      - name: 配布用 zip をパッケージ
+        id: package
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts/package.ps1 -Python python -Clean
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.package_name }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+      # 手動実行でタグを選んだ場合も Release を作らないよう、イベント種別まで確認する
+      - name: Release へアップロード
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        # サードパーティ Action は書き換え可能なタグではなく commit SHA で固定する
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          name: ${{ steps.meta.outputs.app_name }} v${{ steps.meta.outputs.app_version }}
+          files: dist/*.zip
+          generate_release_notes: true

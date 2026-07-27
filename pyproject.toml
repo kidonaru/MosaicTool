@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# mosaic_tool パッケージと scripts/ 配下の開発用ツール(icon_assets)を tests から import できるようにする
+pythonpath = [".", "scripts"]
