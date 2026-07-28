@@ -27,13 +27,13 @@ build *ARGS:
 package *ARGS:
     {{_ps}} scripts/package.ps1 {{ARGS}}
 
-# mosaic_tool/version.py のバージョンを更新してコミットする (例: just bump patch / just bump 1.1.0 / just bump patch -DryRun)
+# mosaic_tool/version.py のバージョンを更新してコミットする (例: just bump patch / just bump 1.1.0 / just bump patch --dry-run)
 bump VERSION="patch" *ARGS:
-    {{_ps}} scripts/bump.ps1 {{VERSION}} {{ARGS}}
+    python scripts/bump.py {{VERSION}} {{ARGS}}
 
-# mosaic_tool/version.py のバージョンでタグを作成して push する (例: just tag / just tag -DryRun)
+# mosaic_tool/version.py のバージョンでタグを作成して push する (例: just tag / just tag --dry-run)
 tag *ARGS:
-    {{_ps}} scripts/tag.ps1 {{ARGS}}
+    python scripts/tag.py {{ARGS}}
 
 # bump と tag をまとめて実行する (例: just release patch / just release 1.1.0)
 release VERSION="patch": (bump VERSION) tag
