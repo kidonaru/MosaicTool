@@ -489,6 +489,9 @@ class MainWindow(QMainWindow):
         )
 
     def _on_detect_progress(self, done: int, total: int, _model: str) -> None:
+        # 全ファイル実行中は処理済みファイル数で進捗を出すため、モデル単位の進捗は捨てる
+        if self._batch_models is not None:
+            return
         if self._detect_window is not None:
             self._detect_window.set_progress(done, total)
 
@@ -570,6 +573,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"検出中... ({self._index + 1}/{len(self._images)})"
         )
+        # 進捗は「処理済みファイル数 / 全ファイル数」。この画像はこれから処理する
+        if self._detect_window is not None:
+            self._detect_window.set_progress(self._index, len(self._images))
         self._request_detect(self._batch_models)
 
     def _on_batch_detected(self, detections: list) -> None:

@@ -291,6 +291,20 @@ def test_detect_all_keeps_the_window_running_until_it_ends(window, batch):
     window._detect_window.close()
 
 
+def test_detect_all_shows_progress_by_processed_files(window, batch):
+    """全ファイル実行の進捗は処理済みファイル数 / 全ファイル数で出す"""
+    window._detect_act.trigger()
+    bar = window._detect_window._bar
+    window._start_detect_all({"a.pt": 0.25})
+    assert (bar.value(), bar.maximum()) == (0, 2)
+    # モデル単位の進捗では上書きしない
+    window._on_detect_progress(1, 3, "a.pt")
+    assert (bar.value(), bar.maximum()) == (0, 2)
+    window._on_detected([])
+    assert (bar.value(), bar.maximum()) == (1, 2)
+    window._detect_window.close()
+
+
 def test_detect_all_stops_on_failure(window, batch, monkeypatch):
     monkeypatch.setattr(
         "mosaic_tool.app.QMessageBox.critical", lambda *args, **kwargs: None
