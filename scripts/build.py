@@ -20,6 +20,7 @@ import zipfile
 from pathlib import Path
 
 import appinfo
+import macos_bundle
 
 UV_ASSETS = {
     "win32": "uv-x86_64-pc-windows-msvc.zip",
@@ -168,6 +169,12 @@ def main() -> None:
     output = built_app_path(app_name, args.onedir)
     if not output.exists():
         appinfo.fail(f"ビルドは完了しましたが実行ファイルが見つかりません: {output}")
+
+    if is_macos():
+        # 署名の前に行う(署名後に書き換えると署名が壊れる)
+        macos_bundle.patch_info_plist(output)
+        print("-- Info.plist に対応ファイル形式を追記しました")
+
     print(f"== 完了: {output} ==")
 
 
