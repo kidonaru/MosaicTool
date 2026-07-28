@@ -1,12 +1,8 @@
 # MosaicTool のリリース作業用タスク (just https://github.com/casey/just)
 # 使い方: just --list
 
-# Windows では sh が無いので PowerShell をレシピ実行シェルに使う
-set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
-
-# just のシェバングレシピ (#!) は Windows でシェバング行を「インタープリタ + 引数 1 個」として
-# 扱うため使えない。処理は .ps1 に置き、レシピからは -File で呼び出す
-_ps := "powershell -ExecutionPolicy Bypass -File"
+# 全レシピを 1 行の python 呼び出しに統一しているため、レシピ実行シェルの差は影響しない
+# (just のシェバングレシピは Windows で動かないため使わない)
 
 _default:
     @just --list
@@ -23,9 +19,9 @@ run *ARGS:
 build *ARGS:
     python scripts/build.py {{ARGS}}
 
-# 配布用 zip をローカルで作成する (例: just package -Clean)
+# 配布用 zip をローカルで作成する (例: just package --clean)
 package *ARGS:
-    {{_ps}} scripts/package.ps1 {{ARGS}}
+    python scripts/package.py {{ARGS}}
 
 # mosaic_tool/version.py のバージョンを更新してコミットする (例: just bump patch / just bump 1.1.0 / just bump patch --dry-run)
 bump VERSION="patch" *ARGS:
