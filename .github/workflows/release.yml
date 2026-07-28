@@ -14,9 +14,48 @@ permissions:
   contents: write # Release の作成とアセットのアップロードに必要
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
-    timeout-minutes: 30
+  # タグとの整合を先に検証し、不一致なら 2 つのビルドを始める前に落とす
+  meta:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      app_name: ${{ steps.read.outputs.app_name }}
+      app_version: ${{ steps.read.outputs.app_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: バージョン情報を取得
+        id: read
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import os, sys
+          sys.path.insert(0, "scripts")
+          import appinfo
+          name, version = appinfo.read_app_name(), appinfo.read_version()
+          ref = os.environ.get("GITHUB_REF", "")
+          # タグ push の場合は mosaic_tool/version.py と食い違っていないか検証する
+          if ref.startswith("refs/tags/"):
+              tag = ref.removeprefix("refs/tags/")
+              if tag != f"v{version}":
+                  raise SystemExit(
+                      f"タグ ({tag}) と mosaic_tool/version.py のバージョン (v{version}) が一致しません"
+                  )
+          print(f"app_name={name}")
+          print(f"app_version={version}")
+          PY
+
+  build:
+    needs: meta
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
@@ -27,32 +66,40 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
 
-      # タグとの整合検証と Artifact 名に使う情報を取り出す
-      # 配布物のファイル名は scripts/package.ps1 が組み立てるため、ここでは作らない
-      - name: バージョン情報を取得
-        id: meta
-        shell: pwsh
+      # Secrets が未設定なら import せず、ad-hoc 署名のままビルドする
+      # (secrets コンテキストは step の if からは参照できないためシェル側で判定する)
+      - name: 署名証明書を読み込む
+        if: runner.os == 'macOS'
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
         run: |
-          $appName = (python -c "import mosaic_tool; print(mosaic_tool.APP_NAME)").Trim()
-          $appVersion = (python -c "import mosaic_tool; print(mosaic_tool.__version__)").Trim()
-          if (-not $appName -or -not $appVersion) {
-              throw "mosaic_tool/version.py からバージョン情報を取得できませんでした"
-          }
-          # タグ push の場合は mosaic_tool/version.py と食い違っていないか検証する
-          if ($env:GITHUB_REF -like "refs/tags/*") {
-              $tag = $env:GITHUB_REF -replace "^refs/tags/", ""
-              if ($tag -ne "v$appVersion") {
-                  throw "タグ ($tag) と mosaic_tool/version.py のバージョン (v$appVersion) が一致しません"
-              }
-          }
-          "app_name=$appName" >> $env:GITHUB_OUTPUT
-          "app_version=$appVersion" >> $env:GITHUB_OUTPUT
+          if [ -z "$MACOS_CERTIFICATE" ]; then
+            echo "-- 署名証明書が未設定のためスキップします"
+            exit 0
+          fi
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PWD="$(python -c 'import secrets; print(secrets.token_urlsafe(24))')"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PWD" "$KEYCHAIN"
+          security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+          rm -f "$RUNNER_TEMP/cert.p12"
 
-      # Artifact 名に使う package_name は package.ps1 が GITHUB_OUTPUT へ書き出す
+      # Artifact 名に使う package_name は package.py が GITHUB_OUTPUT へ書き出す
       - name: 配布用 zip をパッケージ
         id: package
-        shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File scripts/package.ps1 -Python python -Clean
+        env:
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+          MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+        run: python scripts/package.py --clean
 
       - uses: actions/upload-artifact@v4
         with:
@@ -60,12 +107,21 @@ jobs:
           path: dist/*.zip
           if-no-files-found: error
 
-      # 手動実行でタグを選んだ場合も Release を作らないよう、イベント種別まで確認する
-      - name: Release へアップロード
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-        # サードパーティ Action は書き換え可能なタグではなく commit SHA で固定する
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+  # 手動実行でタグを選んだ場合も Release を作らないよう、イベント種別まで確認する
+  release:
+    needs: [meta, build]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
         with:
-          name: ${{ steps.meta.outputs.app_name }} v${{ steps.meta.outputs.app_version }}
+          path: dist
+          merge-multiple: true
+
+      # サードパーティ Action は書き換え可能なタグではなく commit SHA で固定する
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          name: ${{ needs.meta.outputs.app_name }} v${{ needs.meta.outputs.app_version }}
           files: dist/*.zip
           generate_release_notes: true
