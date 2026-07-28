@@ -21,6 +21,8 @@ import re
 import sys
 from pathlib import Path
 
+from console_utf8 import use_utf8_output
+
 # libcrypto-3-x64.dll / libssl-3.dll のように「種別 + 系統」で命名されている
 _OPENSSL_NAME = re.compile(r"^(libssl|libcrypto)(.*\.dll)$", re.IGNORECASE)
 _BINARY_TYPECODE = "BINARY"
@@ -80,6 +82,7 @@ def find_mismatches(toc_text: str) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
+    use_utf8_output()
     if len(argv) != 2:
         print(f"使い方: {Path(argv[0]).name} <EXE-00.toc>", file=sys.stderr)
         return 2

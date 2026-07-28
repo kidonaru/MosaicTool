@@ -17,6 +17,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from console_utf8 import use_utf8_output
+
 EXCLUDED_PLUGIN = "qopensslbackend"
 # pyi-makespec が必ず出力する行。ここに来るまでに a.binaries が確定している
 _ANCHOR = "pyz = PYZ("
@@ -43,6 +45,7 @@ def patch(spec_text: str) -> str:
 
 
 def main(argv: list[str]) -> int:
+    use_utf8_output()
     if len(argv) != 2:
         print(f"使い方: {Path(argv[0]).name} <spec ファイル>", file=sys.stderr)
         return 2

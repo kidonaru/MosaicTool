@@ -12,6 +12,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# 補助スクリプトは出力を UTF-8 に固定しているため、こちら側も UTF-8 で読み取る
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 # スクリプトは scripts/ に置くが、ビルドはリポジトリ直下を基準に行う
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $repoRoot
