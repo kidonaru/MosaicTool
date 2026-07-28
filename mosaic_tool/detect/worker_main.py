@@ -19,27 +19,53 @@ def load_models(model_paths: list[str]) -> list[tuple]:
     return [(Path(p).name, YOLO(p)) for p in model_paths]
 
 
+def class_ids(model, names: list) -> list | None:
+    """クラス名を model.names の ID へ変換する
+
+    指定が空、または 1 つも一致しない場合は None(= 全クラス)を返す。
+    モデルを差し替えてクラス名が総入れ替えになったとき、
+    何も検出されない状態になるのを避けるため。
+    """
+    if not names:
+        return None
+    wanted = {str(n) for n in names}
+    table = getattr(model, "names", {}) or {}
+    ids = [i for i in sorted(table) if str(table[i]) in wanted]
+    return ids or None
+
+
+def model_classes(models: list[tuple]) -> dict:
+    """読み込み済みモデルのクラス名一覧({ファイル名: 名前の列})"""
+    result = {}
+    for name, model in models:
+        table = getattr(model, "names", {}) or {}
+        result[name] = [str(table[i]) for i in sorted(table)]
+    return result
+
+
 def detect(
     models: list[tuple],
     image_path: str,
-    confidences: dict,
+    specs: dict,
     device: str,
     on_progress=None,
 ) -> list[dict]:
     """指定されたモデルだけで推論し、検出を 1 つの列にまとめて返す
 
-    confidences はファイル名をキー、信頼度(0〜1)を値とする。
+    specs はファイル名をキー、{"conf": 信頼度(0〜1), "classes": クラス名} を値とする。
     ここに無いモデルは読み込み済みでも推論しない。
     """
-    targets = [(name, model) for name, model in models if name in confidences]
+    targets = [(name, model) for name, model in models if name in specs]
     detections: list[dict] = []
     for done, (name, model) in enumerate(targets, start=1):
+        spec = specs[name]
         # device が空なら ultralytics の自動選択に任せる
         result = model(
             image_path,
-            conf=confidences[name],
+            conf=float(spec.get("conf", 0.25)),
             device=device or None,
             verbose=False,
+            classes=class_ids(model, spec.get("classes") or []),
         )[0]
         polygons = result.masks.xy if result.masks is not None else None
         for i, box in enumerate(result.boxes):
@@ -64,14 +90,16 @@ def handle_request(models: list[tuple], line: str, emit) -> dict:
     """
     try:
         request = json.loads(line)
-        confidences = {
-            str(name): float(conf)
-            for name, conf in (request.get("models") or {}).items()
+        if request.get("command") == "classes":
+            return {"ok": True, "classes": model_classes(models)}
+        specs = {
+            str(name): dict(spec)
+            for name, spec in (request.get("models") or {}).items()
         }
         detections = detect(
             models,
             request["image"],
-            confidences,
+            specs,
             request.get("device", ""),
             on_progress=lambda done, total, name: emit(
                 {"ok": True, "progress": {"done": done, "total": total, "model": name}}

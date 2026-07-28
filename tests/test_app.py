@@ -197,9 +197,42 @@ def test_start_detect_sends_the_models_to_the_worker(window, monkeypatch):
         lambda image, models, device: sent.append((image, models, device)),
     )
     window._detect_act.trigger()
-    window._start_detect({"a.pt": 0.25})
-    assert sent and sent[0][1] == {"a.pt": 0.25}
+    window._start_detect({"a.pt": {"conf": 0.25, "classes": ["face"]}})
+    assert sent and sent[0][1] == {"a.pt": {"conf": 0.25, "classes": ["face"]}}
     window._detect_window.close()
+
+
+def test_class_request_is_forwarded_to_the_worker(window, monkeypatch):
+    """ウィンドウのクラス要求がワーカーへ渡り、応答がウィンドウへ返る"""
+    calls = []
+    monkeypatch.setattr(
+        window._worker, "request_classes", lambda: calls.append("requested")
+    )
+    window._detect_act.trigger()
+    detect_window = window._detect_window
+    detect_window.classes_requested.emit()
+    assert calls == ["requested"]
+
+    received = []
+    monkeypatch.setattr(detect_window, "show_class_selection", received.append)
+    window._worker.classes_received.emit({"m.pt": ["face"]})
+    assert received == [{"m.pt": ["face"]}]
+    detect_window.close()
+
+
+def test_detect_failure_cancels_a_pending_class_request(window, monkeypatch):
+    monkeypatch.setattr(
+        "mosaic_tool.app.QMessageBox.critical", lambda *args, **kwargs: None
+    )
+    window._detect_act.trigger()
+    detect_window = window._detect_window
+    cancelled = []
+    monkeypatch.setattr(
+        detect_window, "cancel_class_request", lambda: cancelled.append(1)
+    )
+    window._on_detect_failed("失敗")
+    assert cancelled == [1]
+    detect_window.close()
 
 
 @pytest.fixture

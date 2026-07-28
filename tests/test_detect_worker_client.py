@@ -132,3 +132,42 @@ def test_request_without_models_reports_failure(qapp):
     worker.failed.connect(errors.append)
     worker.request("img.png", {}, "")
     assert errors and "モデル" in errors[0]
+
+
+def test_feed_emits_classes(qapp):
+    worker = _worker(qapp)
+    received = []
+    worker.classes_received.connect(received.append)
+    worker._feed(json.dumps({"ok": True, "ready": True}) + "\n")
+    worker._feed(json.dumps({"ok": True, "classes": {"m.pt": ["face"]}}) + "\n")
+    assert received == [{"m.pt": ["face"]}]
+
+
+def test_classes_are_not_reported_as_detections(qapp):
+    worker = _worker(qapp)
+    received = []
+    worker.detected.connect(received.append)
+    worker._feed(json.dumps({"ok": True, "classes": {"m.pt": ["face"]}}) + "\n")
+    assert received == []
+
+
+def test_request_classes_without_any_model_reports_failure(qapp, monkeypatch, tmp_path):
+    monkeypatch.setattr(paths, "base_dir", lambda: tmp_path)
+    (tmp_path / "models").mkdir()
+    worker = _worker(qapp)
+    errors = []
+    worker.failed.connect(errors.append)
+    worker.request_classes()
+    assert errors and "モデル" in errors[0]
+
+
+def test_request_classes_is_ignored_while_busy(qapp, monkeypatch, tmp_path):
+    monkeypatch.setattr(paths, "base_dir", lambda: tmp_path)
+    (tmp_path / "models").mkdir()
+    worker = _worker(qapp)
+    worker._busy = True
+    errors = []
+    worker.failed.connect(errors.append)
+    worker.request_classes()
+    # 検出中は黙って無視する(エラーにはしない)
+    assert errors == []

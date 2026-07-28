@@ -54,9 +54,11 @@ def test_catalog_model_shows_its_label(window):
     assert window._rows["unknown.pt"].label.text() == ""
 
 
-def test_enabled_models_returns_confidence_as_ratio(window):
+def test_enabled_models_returns_confidence_and_classes(window):
     window._rows["unknown.pt"].check.setChecked(False)
-    assert window.enabled_models() == {"Anzhc Eyes -seg-hd.pt": 0.4}
+    assert window.enabled_models() == {
+        "Anzhc Eyes -seg-hd.pt": {"conf": 0.4, "classes": []}
+    }
 
 
 def test_unchecking_disables_the_slider(window):
@@ -112,7 +114,7 @@ def test_detect_requested_carries_the_enabled_models(window):
     received = []
     window.detect_requested.connect(received.append)
     window._on_detect_clicked()
-    assert received == [{"Anzhc Eyes -seg-hd.pt": 0.4}]
+    assert received == [{"Anzhc Eyes -seg-hd.pt": {"conf": 0.4, "classes": []}}]
 
 
 def test_detect_all_requested_carries_the_enabled_models(window):
@@ -120,7 +122,7 @@ def test_detect_all_requested_carries_the_enabled_models(window):
     received = []
     window.detect_all_requested.connect(received.append)
     window._on_detect_all_clicked()
-    assert received == [{"Anzhc Eyes -seg-hd.pt": 0.4}]
+    assert received == [{"Anzhc Eyes -seg-hd.pt": {"conf": 0.4, "classes": []}}]
 
 
 def test_detect_all_button_follows_the_detect_button(window):
@@ -240,3 +242,89 @@ def test_stale_stretch_is_cleared_when_the_list_shrinks(window, tmp_path):
     rows = len(window._rows)
     assert window._grid.rowStretch(rows) == 1
     assert window._grid.rowStretch(rows + 1) == 0
+
+
+def test_enabled_models_carries_the_saved_classes(window):
+    window._settings.set_model_classes("unknown.pt", ["penis"])
+    window.refresh()
+    assert window.enabled_models()["unknown.pt"]["classes"] == ["penis"]
+
+
+def test_class_button_shows_the_selected_count(window):
+    assert window._rows["unknown.pt"].class_button.text() == "クラス…"
+    window._settings.set_model_classes("unknown.pt", ["penis", "pussy"])
+    window.refresh()
+    assert window._rows["unknown.pt"].class_button.text() == "クラス (2件)"
+
+
+def test_unchecking_disables_the_class_button(window):
+    row = window._rows["unknown.pt"]
+    row.check.setChecked(False)
+    assert row.class_button.isEnabled() is False
+
+
+def test_class_button_emits_the_request_and_waits(window):
+    seen = []
+    window.classes_requested.connect(lambda: seen.append(1))
+    window._on_class_clicked("unknown.pt")
+    assert seen == [1]
+    assert window._pending_class_model == "unknown.pt"
+    assert window._group.isEnabled() is False
+
+
+def test_cancelling_the_class_request_restores_the_display(window):
+    window._on_class_clicked("unknown.pt")
+    window.cancel_class_request()
+    assert window._pending_class_model is None
+    assert window._group.isEnabled() is True
+
+
+def test_accepting_the_dialog_saves_the_selection(window, monkeypatch, tmp_path):
+    from mosaic_tool.detect import detect_window as module
+
+    class FakeDialog:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return module.QDialog.DialogCode.Accepted
+
+        def selected_classes(self):
+            return ["penis"]
+
+    monkeypatch.setattr(module, "ClassSelectDialog", FakeDialog)
+    window._on_class_clicked("unknown.pt")
+    window.show_class_selection({"unknown.pt": ["face", "penis"]})
+    assert window._pending_class_model is None
+    reopened = AppSettings(
+        QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    )
+    assert reopened.model_classes("unknown.pt") == ["penis"]
+    assert window._rows["unknown.pt"].class_button.text() == "クラス (1件)"
+
+
+def test_cancelling_the_dialog_keeps_the_selection(window, monkeypatch):
+    from mosaic_tool.detect import detect_window as module
+
+    class FakeDialog:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return module.QDialog.DialogCode.Rejected
+
+        def selected_classes(self):
+            return ["penis"]
+
+    monkeypatch.setattr(module, "ClassSelectDialog", FakeDialog)
+    window._on_class_clicked("unknown.pt")
+    window.show_class_selection({"unknown.pt": ["face", "penis"]})
+    assert window._settings.model_classes("unknown.pt") == []
+
+
+def test_class_selection_for_an_unknown_model_is_dropped(window):
+    # 応答が届く前に models\ が変わった場合
+    window._on_class_clicked("unknown.pt")
+    window.show_class_selection({"other.pt": ["face"]})
+    assert window._pending_class_model is None
+    assert window._group.isEnabled() is True

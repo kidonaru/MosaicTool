@@ -96,6 +96,31 @@ def test_model_confidence_out_of_range_falls_back_to_default(tmp_path):
     assert s.model_confidence(name, 1, 100, 25) == 25
 
 
+def test_model_classes_defaults_to_empty(tmp_path):
+    # 未設定は「制限なし(全クラス)」を意味する空リスト
+    s = _settings(tmp_path)
+    assert s.model_classes("m.pt") == []
+
+
+def test_model_classes_roundtrip(tmp_path):
+    s = _settings(tmp_path)
+    s.set_model_classes("m.pt", ["penis", "pussy"])
+    assert _settings(tmp_path).model_classes("m.pt") == ["penis", "pussy"]
+
+
+def test_model_classes_survives_a_single_entry(tmp_path):
+    # QSettings は 1 件のリストを文字列で返すことがある
+    s = _settings(tmp_path)
+    s.set_model_classes("m.pt", ["penis"])
+    assert _settings(tmp_path).model_classes("m.pt") == ["penis"]
+
+
+def test_model_classes_are_per_model(tmp_path):
+    s = _settings(tmp_path)
+    s.set_model_classes("a.pt", ["penis"])
+    assert s.model_classes("b.pt") == []
+
+
 def test_device_defaults_to_auto(tmp_path):
     assert _settings(tmp_path).device() == DEFAULT_DEVICE
 

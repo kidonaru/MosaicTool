@@ -141,6 +141,24 @@ class AppSettings:
     def set_model_confidence(self, filename: str, value: int) -> None:
         self._qsettings.setValue(self._model_key(filename, "confidence"), int(value))
 
+    def model_classes(self, filename: str) -> list[str]:
+        """検出対象のクラス名。空リストは制限なし(全クラス)を意味する
+
+        QSettings は 1 件だけのリストを文字列で返すことがあるため、
+        読み出し側で必ずリストへ揃える。
+        """
+        value = self._qsettings.value(self._model_key(filename, "classes"), [])
+        if isinstance(value, str):
+            return [value] if value else []
+        if not isinstance(value, (list, tuple)):
+            return []
+        return [str(v) for v in value]
+
+    def set_model_classes(self, filename: str, names: list[str]) -> None:
+        self._qsettings.setValue(
+            self._model_key(filename, "classes"), [str(n) for n in names]
+        )
+
     def device(self) -> str:
         value = str(self._qsettings.value(_KEY_DEVICE, DEFAULT_DEVICE))
         return value if value in ("auto", "cpu") else DEFAULT_DEVICE

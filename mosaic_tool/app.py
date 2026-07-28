@@ -90,6 +90,7 @@ class MainWindow(QMainWindow):
         self._worker.detected.connect(self._on_detected)
         self._worker.progress.connect(self._on_detect_progress)
         self._worker.failed.connect(self._on_detect_failed)
+        self._worker.classes_received.connect(self._on_classes_received)
         self._detect_window: DetectWindow | None = None
         # 全ファイル実行中のモデル構成(None なら通常の 1 枚ずつの検出)
         self._batch_models: dict | None = None
@@ -460,6 +461,7 @@ class MainWindow(QMainWindow):
             window = DetectWindow(self._settings, self)
             window.detect_requested.connect(self._start_detect)
             window.detect_all_requested.connect(self._start_detect_all)
+            window.classes_requested.connect(self._worker.request_classes)
             # モデルの顔ぶれが変わったらワーカーを畳み、次回に新しい構成で起動させる
             window.models_changed.connect(self._worker.stop)
             self._detect_window = window
@@ -524,7 +526,15 @@ class MainWindow(QMainWindow):
             return
         self.statusBar().showMessage(f"{added} 件の範囲を追加しました", 5000)
 
+    def _on_classes_received(self, classes: dict) -> None:
+        """クラス一覧が届いたら検出ウィンドウへ渡す"""
+        if self._detect_window is not None:
+            self._detect_window.show_class_selection(classes)
+
     def _on_detect_failed(self, message: str) -> None:
+        # クラス一覧の取得に失敗した場合も待ち表示を畳む
+        if self._detect_window is not None:
+            self._detect_window.cancel_class_request()
         self._batch_models = None
         self._finish_detect()
         self.statusBar().clearMessage()

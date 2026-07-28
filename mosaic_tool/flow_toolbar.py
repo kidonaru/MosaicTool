@@ -19,6 +19,8 @@ from PySide6.QtWidgets import (
 TOOLBAR_MARGIN = 4      # ツールバーの外周余白 (px)
 TOOLBAR_SPACING = 4     # 項目同士の間隔 (px)
 SEPARATOR_HEIGHT = 20   # 区切り線の高さ (px)
+SEPARATOR_WIDTH = 1     # 区切り線の太さ (px)
+SEPARATOR_COLOR = "#9a9a9a"  # 区切り線の色
 
 
 class FlowLayout(QLayout):
@@ -157,8 +159,9 @@ class FlowToolBar(QWidget):
 
     def add_separator(self) -> None:
         """項目のグループを区切る縦線を追加する"""
+        # 立体的な彫り込み表現を避け、単色の細い縦線として描画する
         line = QFrame(self)
-        line.setFrameShape(QFrame.Shape.VLine)
-        line.setFrameShadow(QFrame.Shadow.Sunken)
-        line.setFixedHeight(SEPARATOR_HEIGHT)
+        line.setFrameShape(QFrame.Shape.NoFrame)
+        line.setFixedSize(SEPARATOR_WIDTH, SEPARATOR_HEIGHT)
+        line.setStyleSheet(f"background-color: {SEPARATOR_COLOR};")
         self._layout.addWidget(line)

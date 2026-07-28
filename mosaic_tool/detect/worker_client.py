@@ -7,7 +7,12 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QProcess, QTimer, Signal
 
 from mosaic_tool.detect import paths
-from mosaic_tool.detect.convert import DetectError, build_request, parse_response
+from mosaic_tool.detect.convert import (
+    DetectError,
+    build_classes_request,
+    build_request,
+    parse_response,
+)
 
 # 1 枚あたりの検出を待つ上限(モデル読み込みを含む初回を見込んで長めに取る)
 DETECT_TIMEOUT_MS = 120_000
@@ -41,6 +46,7 @@ class DetectWorker(QObject):
     """
 
     detected = Signal(list)              # 検出結果 (list[dict])
+    classes_received = Signal(dict)      # {ファイル名: [クラス名]}
     progress = Signal(int, int, str)     # (完了数, 総数, モデル名)
     failed = Signal(str)                 # エラーメッセージ
 
@@ -77,6 +83,23 @@ class DetectWorker(QObject):
         self._busy = True
         self._timer.start()
         self._process.write(build_request(image_path, models, device).encode("utf-8"))
+
+    def request_classes(self) -> None:
+        """読み込み済みモデルのクラス一覧を問い合わせる
+
+        結果は classes_received で返る。検出中は黙って無視する。
+        """
+        if self._busy:
+            return
+        available = paths.model_files()
+        if not available:
+            self.failed.emit(f"検出モデルが見つかりません: {paths.models_dir()}")
+            return
+        if self._process is None and not self._start(available):
+            return
+        self._busy = True
+        self._timer.start()
+        self._process.write(build_classes_request().encode("utf-8"))
 
     def stop(self) -> None:
         """ワーカーを終了する(アプリ終了時に呼ぶ)"""
@@ -136,6 +159,10 @@ class DetectWorker(QObject):
             return
         if response.progress is not None:
             self.progress.emit(*response.progress)
+            return
+        if response.classes is not None:
+            self._finish_request()
+            self.classes_received.emit(response.classes)
             return
         self._finish_request()
         self.detected.emit(response.detections or [])

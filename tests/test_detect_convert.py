@@ -15,20 +15,59 @@ from mosaic_tool.regions import RegionKind
 IMAGE_SIZE = (1000, 1000)
 
 
-def test_build_request_carries_per_model_confidence():
-    line = convert.build_request("a.png", {"m1.pt": 0.25, "m2.pt": 0.4}, "cpu")
+def test_build_request_carries_per_model_confidence_and_classes():
+    line = convert.build_request(
+        "a.png",
+        {
+            "m1.pt": {"conf": 0.25, "classes": []},
+            "m2.pt": {"conf": 0.4, "classes": ["penis"]},
+        },
+        "cpu",
+    )
     assert line.endswith("\n")
     payload = json.loads(line)
     assert payload == {
+        "command": "detect",
         "image": "a.png",
-        "models": {"m1.pt": 0.25, "m2.pt": 0.4},
+        "models": {
+            "m1.pt": {"conf": 0.25, "classes": []},
+            "m2.pt": {"conf": 0.4, "classes": ["penis"]},
+        },
         "device": "cpu",
     }
 
 
 def test_build_request_keeps_non_ascii_filenames_readable():
-    line = convert.build_request("画像.png", {"モデル.pt": 0.3}, "")
+    line = convert.build_request("画像.png", {"モデル.pt": {"conf": 0.3, "classes": []}}, "")
     assert "画像.png" in line
+    assert "モデル.pt" in line
+
+
+def test_build_classes_request_is_a_single_command_line():
+    line = convert.build_classes_request()
+    assert line.endswith("\n")
+    assert json.loads(line) == {"command": "classes"}
+
+
+def test_parse_response_reports_classes():
+    line = json.dumps({"ok": True, "classes": {"m.pt": ["penis", "pussy"]}})
+    res = convert.parse_response(line)
+    assert res.classes == {"m.pt": ["penis", "pussy"]}
+    assert res.detections is None
+    assert res.ready is False
+
+
+def test_parse_response_normalises_class_payloads():
+    # 壊れた値が来ても後段が list[str] を前提にできるようにする
+    line = json.dumps({"ok": True, "classes": {"m.pt": ["a", 1], "bad.pt": "x"}})
+    res = convert.parse_response(line)
+    assert res.classes == {"m.pt": ["a", "1"], "bad.pt": []}
+
+
+def test_parse_response_without_classes_is_still_a_detection():
+    res = convert.parse_response(json.dumps({"ok": True, "detections": []}))
+    assert res.classes is None
+    assert res.detections == []
 
 
 def test_parse_response_reports_ready():

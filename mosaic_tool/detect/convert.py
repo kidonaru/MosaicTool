@@ -22,21 +22,41 @@ class DetectError(Exception):
 
 @dataclass(frozen=True)
 class WorkerResponse:
-    """ワーカーの応答 1 行の中身(3 種のうちどれか 1 つだけが埋まる)"""
+    """ワーカーの応答 1 行の中身(4 種のうちどれか 1 つだけが埋まる)"""
 
     ready: bool = False
     progress: tuple[int, int, str] | None = None   # (完了数, 総数, モデル名)
     detections: list[dict] | None = None
+    classes: dict[str, list[str]] | None = None    # {ファイル名: クラス名の列}
 
 
-def build_request(image_path: str, models: dict[str, float], device: str) -> str:
-    """ワーカーへ送るリクエスト 1 行(改行付き)を組み立てる
+def build_request(image_path: str, models: dict[str, dict], device: str) -> str:
+    """ワーカーへ送る検出リクエスト 1 行(改行付き)を組み立てる
 
-    models はファイル名をキー、信頼度(0〜1)を値とする。
+    models はファイル名をキー、{"conf": 信頼度(0〜1), "classes": クラス名} を値とする。
     ここに載っていないモデルはワーカー側で推論されない。
+    classes が空なら、そのモデルの全クラスが対象になる。
     """
-    payload = {"image": image_path, "models": models, "device": device}
+    payload = {
+        "command": "detect",
+        "image": image_path,
+        "models": models,
+        "device": device,
+    }
     return json.dumps(payload, ensure_ascii=False) + "\n"
+
+
+def build_classes_request() -> str:
+    """読み込み済みモデルのクラス一覧を問い合わせる 1 行(改行付き)"""
+    return json.dumps({"command": "classes"}, ensure_ascii=False) + "\n"
+
+
+def _classes_payload(value: dict) -> dict[str, list[str]]:
+    """クラス一覧の応答を {ファイル名: list[str]} へ揃える"""
+    return {
+        str(name): [str(c) for c in names] if isinstance(names, list) else []
+        for name, names in value.items()
+    }
 
 
 def parse_response(line: str) -> WorkerResponse:
@@ -60,6 +80,9 @@ def parse_response(line: str) -> WorkerResponse:
                 str(progress.get("model", "")),
             )
         )
+    classes = payload.get("classes")
+    if isinstance(classes, dict):
+        return WorkerResponse(classes=_classes_payload(classes))
     return WorkerResponse(detections=payload.get("detections", []))
 
 
