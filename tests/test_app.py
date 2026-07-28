@@ -223,6 +223,17 @@ def test_start_detect_sends_the_models_to_the_worker(window, monkeypatch):
     window._detect_window.close()
 
 
+def test_request_detect_uses_resolved_device(window, monkeypatch):
+    """設定値そのままではなく、OS ごとに解決した device をワーカーへ渡すこと"""
+    monkeypatch.setattr("mosaic_tool.app.resolve_device", lambda setting: "mps")
+    sent = []
+    monkeypatch.setattr(
+        window._worker, "request", lambda image, models, device: sent.append(device)
+    )
+    window._request_detect({"a.pt": {"conf": 0.25, "classes": ["face"]}})
+    assert sent == ["mps"]
+
+
 def test_class_request_is_forwarded_to_the_worker(window, monkeypatch):
     """ウィンドウのクラス要求がワーカーへ渡り、応答がウィンドウへ返る"""
     calls = []

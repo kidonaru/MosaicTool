@@ -22,6 +22,7 @@ from mosaic_tool.canvas import MosaicCanvas, ToolMode
 from mosaic_tool.detect import paths as detect_paths
 from mosaic_tool.detect.convert import detections_to_regions
 from mosaic_tool.detect.detect_window import DetectWindow
+from mosaic_tool.detect.runtime import resolve_device
 from mosaic_tool.detect.setup_dialog import RuntimeSetupDialog
 from mosaic_tool.detect.worker_client import DetectWorker
 from mosaic_tool.flow_toolbar import FlowToolBar
@@ -504,7 +505,7 @@ class MainWindow(QMainWindow):
         self._worker.request(
             str(self._images[self._index]),
             models,
-            "" if self._settings.device() == "auto" else "cpu",
+            resolve_device(self._settings.device()),
         )
 
     def _on_detect_progress(self, done: int, total: int, _model: str) -> None:
