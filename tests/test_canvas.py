@@ -89,3 +89,53 @@ def test_overlay_clip_is_snapped_to_cells(qapp):
     mask = snap_mask_to_grid(paths_to_mask(canvas.image_paths(), (100, 100)), 10, 0.5)
     for x in (5, 25, 29, 31, 95):
         assert clip.contains(QPointF(x, 50)) == (mask.getpixel((x, 50)) == 255)
+
+
+def _canvas_with_image(qapp) -> MosaicCanvas:
+    canvas = MosaicCanvas()
+    canvas.set_image(Image.new("RGB", (200, 200), (0, 0, 0)))
+    return canvas
+
+
+def _rect_region(x: float) -> Region:
+    return Region(kind=RegionKind.RECT, rect=QRectF(x, 0, 10, 10))
+
+
+def test_add_regions_adds_all(qapp):
+    canvas = _canvas_with_image(qapp)
+    canvas.add_regions([_rect_region(0), _rect_region(20)])
+    assert len(canvas.get_regions()) == 2
+
+
+def test_add_regions_undo_removes_all_at_once(qapp):
+    canvas = _canvas_with_image(qapp)
+    canvas.add_regions([_rect_region(0), _rect_region(20)])
+    canvas.undo()
+    assert canvas.get_regions() == []
+
+
+def test_add_regions_keeps_existing_regions(qapp):
+    canvas = _canvas_with_image(qapp)
+    canvas.add_region(_rect_region(100))
+    canvas.add_regions([_rect_region(0), _rect_region(20)])
+    canvas.undo()
+    # 手で引いた範囲は残る
+    assert len(canvas.get_regions()) == 1
+
+
+def test_add_regions_selects_only_added_regions(qapp):
+    canvas = _canvas_with_image(qapp)
+    old = canvas.add_region(_rect_region(100))
+    old.setSelected(True)
+    items = canvas.add_regions([_rect_region(0)])
+    assert items[0].isSelected()
+    assert not old.isSelected()
+
+
+def test_add_regions_with_empty_list_pushes_no_undo(qapp):
+    canvas = _canvas_with_image(qapp)
+    canvas.add_region(_rect_region(100))
+    canvas.add_regions([])
+    canvas.undo()
+    # 空追加は Undo を消費しないため、直前の追加が取り消される
+    assert canvas.get_regions() == []

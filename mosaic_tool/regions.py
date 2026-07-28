@@ -5,12 +5,13 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QPainterPath, QPainterPathStroker, QTransform
+from PySide6.QtGui import QPainterPath, QPainterPathStroker, QPolygonF, QTransform
 
 
 class RegionKind(Enum):
     RECT = "rect"
     STROKE = "stroke"
+    POLYGON = "polygon"  # points を閉じた多角形として扱う(検出マスクの輪郭)
 
 
 @dataclass
@@ -31,6 +32,11 @@ class Region:
         path = QPainterPath()
         if self.kind is RegionKind.RECT:
             path.addRect(self.rect)
+            return path
+        if self.kind is RegionKind.POLYGON:
+            # 検出マスクの輪郭。始点と終点をつないだ閉じた図形にする
+            path.addPolygon(QPolygonF(self.points))
+            path.closeSubpath()
             return path
         # ストローク: 点列をつないだ折れ線を太らせた輪郭
         path.moveTo(self.points[0])

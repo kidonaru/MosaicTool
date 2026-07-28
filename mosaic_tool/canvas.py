@@ -605,6 +605,21 @@ class MosaicCanvas(QGraphicsView):
         self._refresh_overlay()
         return item
 
+    def add_regions(self, regions: list[Region]) -> list[RegionItem]:
+        """複数の範囲をまとめて追加する(自動検出用)
+
+        Undo スタックには 1 エントリだけ積み、Ctrl+Z 一回で追加分をまとめて
+        取り消せるようにする。追加分だけを選択状態にして、どれが増えたか分かるようにする。
+        """
+        if not regions:
+            return []
+        self._scene.clearSelection()
+        items = [self.add_region(region, push_undo=False) for region in regions]
+        for item in items:
+            item.setSelected(True)
+        self._undo_stack.append(("add_many", items))
+        return items
+
     def image_paths(self) -> list[QPainterPath]:
         """全範囲の画像座標パス(保存時のマスク生成に使う)"""
         return [item.image_path() for item in self._region_items()]
@@ -623,6 +638,9 @@ class MosaicCanvas(QGraphicsView):
         entry = self._undo_stack.pop()
         if entry[0] == "add":
             self._scene.removeItem(entry[1])
+        elif entry[0] == "add_many":
+            for item in entry[1]:
+                self._scene.removeItem(item)
         elif entry[0] == "remove":
             for item in entry[1]:
                 self._scene.addItem(item)

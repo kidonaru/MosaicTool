@@ -3,6 +3,8 @@ from PySide6.QtCore import QSettings
 
 from mosaic_tool.settings import (
     DEFAULT_BLOCK,
+    DEFAULT_CONFIDENCE,
+    DEFAULT_DEVICE,
     DEFAULT_PEN_WIDTH,
     DEFAULT_THRESHOLD,
     AppSettings,
@@ -57,3 +59,31 @@ def test_block_off_step_falls_back_to_default(tmp_path):
     s = _settings(tmp_path)
     s._qsettings.setValue("mosaic/block", 7)
     assert s.block(5, 100, 5) == DEFAULT_BLOCK
+
+
+def test_confidence_defaults_to_25(tmp_path):
+    assert _settings(tmp_path).confidence(1, 100) == DEFAULT_CONFIDENCE
+
+
+def test_confidence_roundtrip(tmp_path):
+    settings = _settings(tmp_path)
+    settings.set_confidence(40)
+    assert settings.confidence(1, 100) == 40
+
+
+def test_confidence_out_of_range_falls_back_to_default(tmp_path):
+    settings = _settings(tmp_path)
+    settings.set_confidence(500)
+    assert settings.confidence(1, 100) == DEFAULT_CONFIDENCE
+
+
+def test_device_defaults_to_auto(tmp_path):
+    assert _settings(tmp_path).device() == DEFAULT_DEVICE
+
+
+def test_device_roundtrip_and_invalid_value(tmp_path):
+    settings = _settings(tmp_path)
+    settings.set_device("cpu")
+    assert settings.device() == "cpu"
+    settings.set_device("gpu")
+    assert settings.device() == DEFAULT_DEVICE

@@ -17,6 +17,8 @@ DEFAULT_THRESHOLD = 10    # マス単位判定のしきい値 (%)
 DEFAULT_PEN_WIDTH = 20    # ペン太さ (px)
 DEFAULT_AUTOSAVE = True   # 自動保存
 DEFAULT_MODE = "pen"      # ツールモード ("pen" / "rect")
+DEFAULT_CONFIDENCE = 25   # 自動検出の信頼度しきい値 (%)
+DEFAULT_DEVICE = "auto"   # 推論デバイス ("auto" / "cpu")
 
 _KEY_BLOCK = "mosaic/block"
 _KEY_THRESHOLD = "mosaic/threshold"
@@ -24,6 +26,8 @@ _KEY_PEN_WIDTH = "tool/pen_width"
 _KEY_AUTOSAVE = "save/autosave"
 _KEY_MODE = "tool/mode"
 _KEY_GEOMETRY = "window/geometry"
+_KEY_CONFIDENCE = "detect/confidence"
+_KEY_DEVICE = "detect/device"
 
 
 class AppSettings:
@@ -89,6 +93,21 @@ class AppSettings:
 
     def set_mode(self, value: str) -> None:
         self._qsettings.setValue(_KEY_MODE, value)
+
+    # --- 自動検出 ---
+
+    def confidence(self, minimum: int, maximum: int) -> int:
+        return self._int(_KEY_CONFIDENCE, DEFAULT_CONFIDENCE, minimum, maximum)
+
+    def set_confidence(self, value: int) -> None:
+        self._qsettings.setValue(_KEY_CONFIDENCE, int(value))
+
+    def device(self) -> str:
+        value = str(self._qsettings.value(_KEY_DEVICE, DEFAULT_DEVICE))
+        return value if value in ("auto", "cpu") else DEFAULT_DEVICE
+
+    def set_device(self, value: str) -> None:
+        self._qsettings.setValue(_KEY_DEVICE, value)
 
     # --- ウィンドウジオメトリ ---
 

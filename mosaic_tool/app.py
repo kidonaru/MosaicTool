@@ -3,10 +3,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QActionGroup, QKeySequence
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
+    QDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -16,6 +17,10 @@ from PySide6.QtWidgets import (
 
 from mosaic_tool import io_utils
 from mosaic_tool.canvas import MosaicCanvas, ToolMode
+from mosaic_tool.detect import paths as detect_paths
+from mosaic_tool.detect.convert import detections_to_regions
+from mosaic_tool.detect.setup_dialog import RuntimeSetupDialog
+from mosaic_tool.detect.worker_client import DetectWorker
 from mosaic_tool.mosaic import apply_mosaic
 from mosaic_tool.regions import Region
 from mosaic_tool.settings import AppSettings
@@ -30,6 +35,9 @@ PEN_MAX = 200       # ペン太さの上限 (px)
 THRESHOLD_STEP = 5  # しきい値の矢印ボタンの刻み幅 (%。数値入力は 1% 刻み)
 THRESHOLD_MIN = 0   # マス単位判定のしきい値の下限 (%)
 THRESHOLD_MAX = 100  # 同上限 (%)
+CONFIDENCE_MIN = 1    # 自動検出の信頼度しきい値の下限 (%)
+CONFIDENCE_MAX = 100  # 同上限 (%)
+CONFIDENCE_STEP = 5   # 矢印ボタンの刻み幅 (%。数値入力は 1% 刻み)
 
 _MODE_BY_KEY = {"rect": ToolMode.RECT, "pen": ToolMode.PEN}
 _KEY_BY_MODE = {mode: key for key, mode in _MODE_BY_KEY.items()}
@@ -64,6 +72,11 @@ class MainWindow(QMainWindow):
         self._block = self._settings.block(BLOCK_STEP, BLOCK_MAX, BLOCK_STEP)
         # マス単位判定のしきい値 (%)。同上
         self._threshold = self._settings.threshold(THRESHOLD_MIN, THRESHOLD_MAX)
+
+        # 自動検出(推論は別プロセスの venv 側で動く)
+        self._worker = DetectWorker(self)
+        self._worker.detected.connect(self._on_detected)
+        self._worker.failed.connect(self._on_detect_failed)
 
         self._build_toolbar()
         if paths:
@@ -179,6 +192,22 @@ class MainWindow(QMainWindow):
         self._add_shortcut(self._preview_act, QKeySequence(Qt.Key.Key_Tab))
         self._preview_act.toggled.connect(self.canvas.set_preview_mode)
         tb.addAction(self._preview_act)
+        tb.addSeparator()
+        # 自動検出: 検出した範囲を追加する(既存の範囲は消さない)
+        self._detect_act = QAction("自動検出", self)
+        self._add_shortcut(self._detect_act, QKeySequence(Qt.Key.Key_D))
+        self._detect_act.triggered.connect(self._on_detect)
+        tb.addAction(self._detect_act)
+        tb.addWidget(QLabel(" 信頼度 "))
+        self._confidence_spin = QSpinBox()
+        self._confidence_spin.setRange(CONFIDENCE_MIN, CONFIDENCE_MAX)
+        self._confidence_spin.setSingleStep(CONFIDENCE_STEP)
+        self._confidence_spin.setValue(
+            self._settings.confidence(CONFIDENCE_MIN, CONFIDENCE_MAX)
+        )
+        self._confidence_spin.setSuffix(" %")
+        self._confidence_spin.valueChanged.connect(self._settings.set_confidence)
+        tb.addWidget(self._confidence_spin)
 
     def _on_block_changed(self, value: int) -> None:
         # 5px 刻みにスナップする
@@ -377,6 +406,63 @@ class MainWindow(QMainWindow):
                     self, "完了", f"最後の画像です。保存先: {io_utils.mc_folder_path(self._folder)}"
                 )
 
+    # --- 自動検出 ---
+
+    def _on_detect(self) -> None:
+        """表示中の画像に対して自動検出を実行する"""
+        if not self._images or self._current_image is None:
+            return
+        if self._worker.is_busy():
+            return
+        if not detect_paths.is_runtime_ready():
+            dialog = RuntimeSetupDialog(self)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+        if not detect_paths.model_files():
+            self._warn_models_missing()
+            return
+        self._detect_act.setEnabled(False)
+        self.statusBar().showMessage("検出中...")
+        self._worker.request(
+            str(self._images[self._index]),
+            self._confidence_spin.value() / 100,
+            "" if self._settings.device() == "auto" else "cpu",
+        )
+
+    def _warn_models_missing(self) -> None:
+        """モデル未配置を案内する(置き場所をすぐ開けるようにする)"""
+        directory = detect_paths.models_dir()
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("エラー")
+        box.setText(
+            "検出モデルが見つかりません。\n"
+            f"{directory} に .pt ファイルを置いてください。"
+        )
+        open_button = box.addButton("フォルダを開く", QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Close)
+        box.exec()
+        if box.clickedButton() is open_button:
+            directory.mkdir(parents=True, exist_ok=True)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory)))
+
+    def _on_detected(self, detections: list) -> None:
+        """検出結果を範囲として追加する(既存の範囲は残す)"""
+        self._detect_act.setEnabled(True)
+        if self._current_image is None:
+            return
+        regions = detections_to_regions(detections, self._current_image.size)
+        if not regions:
+            self.statusBar().showMessage("検出されませんでした", 5000)
+            return
+        self.canvas.add_regions(regions)
+        self.statusBar().showMessage(f"{len(regions)} 件の範囲を追加しました", 5000)
+
+    def _on_detect_failed(self, message: str) -> None:
+        self._detect_act.setEnabled(True)
+        self.statusBar().clearMessage()
+        QMessageBox.critical(self, "検出エラー", message)
+
     # --- 未保存確認 ---
 
     def _on_regions_changed(self) -> None:
@@ -404,6 +490,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         if self._confirm_discard():
+            self._worker.stop()
             self._settings.set_geometry(self.saveGeometry())
             event.accept()
         else:

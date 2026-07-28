@@ -22,6 +22,12 @@ powershell -ExecutionPolicy Bypass -File scripts/build.ps1
 | `-Python <path>` | 使用する Python を指定(既定: `.venv` → `py -3` → `python` の順に探索) |
 | `-OneDir` | 1 ファイルではなくフォルダ形式で出力(起動が速い) |
 | `-Clean` | `build/` `dist/` を削除してからビルド |
+| `-UvVersion <ver>` | 同梱する uv のバージョン(既定: `latest`) |
+
+自動検出の実行環境セットアップに使う `uv.exe`(約 50MB)を GitHub から取得して `build/uv/` に
+キャッシュし、exe へ同梱します。あわせて検出ワーカー `mosaic_tool/detect/worker_main.py` を
+`.py` の実体として同梱します(venv の Python へスクリプトのパスとして渡すため、
+PYZ に取り込まれるだけでは足りません)。同梱物は `sys._MEIPASS` を基準に解決します。
 
 アイコンは `assets/icon.ico`（マスターは `assets/icon.png`、`python scripts/icon_assets.py` で再生成）が埋め込まれます。
 アプリ名とバージョンは `mosaic_tool/version.py` で管理し、ウィンドウタイトルとビルド成果物名の双方に反映されます。
