@@ -113,4 +113,14 @@ $output = if ($OneDir) { "dist\$appName\$appName.exe" } else { "dist\$appName.ex
 if (-not (Test-Path $output)) {
     throw "ビルドは完了しましたが実行ファイルが見つかりません: $output"
 }
+
+# 同梱された OpenSSL の組み合わせを検証する
+# (libssl と libcrypto が別ディレクトリから拾われると実行時にシンボル欠落で落ちる)
+$tocPath = Join-Path $repoRoot "build\$appName\EXE-00.toc"
+if (-not (Test-Path -LiteralPath $tocPath)) {
+    # 検証を黙って飛ばすと壊れた exe をそのまま配布してしまうため、ここで止める
+    throw "TOC が見つからず OpenSSL を検証できません (PyInstaller の出力形式が変わった可能性): $tocPath"
+}
+Write-Host "-- 同梱された OpenSSL を検証します"
+Invoke-Python @((Join-Path $PSScriptRoot "check_bundled_openssl.py"), $tocPath)
 Write-Host "== 完了: $output ==" -ForegroundColor Green
