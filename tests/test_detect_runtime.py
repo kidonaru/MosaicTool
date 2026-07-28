@@ -3,8 +3,8 @@ from pathlib import Path
 
 from mosaic_tool.detect import runtime
 
-UV = Path("C:/app/uv.exe")
-RUNTIME = Path("C:/app/runtime")
+UV = Path("/app/uv")
+RUNTIME = Path("/app/runtime")
 
 
 def test_venv_command_pins_python_version():

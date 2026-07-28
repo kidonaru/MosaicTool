@@ -26,8 +26,9 @@ def window(qapp, monkeypatch, tmp_path):
     models.mkdir()
     (models / "Anzhc Eyes -seg-hd.pt").write_bytes(b"x")
     (models / "unknown.pt").write_bytes(b"x")
-    (tmp_path / "runtime" / "Scripts").mkdir(parents=True)
-    (tmp_path / "runtime" / "Scripts" / "python.exe").write_bytes(b"x")
+    python = paths.venv_python()
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"x")
     settings = AppSettings(
         QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
     )

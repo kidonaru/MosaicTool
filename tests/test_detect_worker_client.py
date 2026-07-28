@@ -16,10 +16,10 @@ def qapp():
     return QApplication.instance() or QApplication([])
 
 
-def test_worker_command_lists_models_as_arguments():
-    python = Path("C:/rt/python.exe")
-    script = Path("C:/rt/detect_worker.py")
-    models = [Path("C:/m/a.pt"), Path("C:/m/b.pt")]
+def test_worker_command_lists_models_as_arguments(tmp_path):
+    python = tmp_path / "runtime" / "python"
+    script = tmp_path / "runtime" / "detect_worker.py"
+    models = [tmp_path / "models" / "a.pt", tmp_path / "models" / "b.pt"]
     cmd = worker_client.worker_command(python, script, models)
     assert cmd == [str(python), str(script), str(models[0]), str(models[1])]
 

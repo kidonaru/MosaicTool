@@ -55,14 +55,19 @@ def test_preview_shortcut_is_tab(window):
 
 
 def test_toolbar_actions_show_key_in_tooltip(window):
+    # キーの表記は OS で異なる(macOS は ⌘S / ⇥ のような記号)ため、
+    # 期待値も Qt のネイティブ表記から組み立てる
+    def key_text(key) -> str:
+        return QKeySequence(key).toString(QKeySequence.SequenceFormat.NativeText)
+
     expected = {
-        "ペン": "ペン (1)",
-        "矩形": "矩形 (2)",
-        "◀ 前へ": "◀ 前へ (Left)",
-        "次へ ▶": "次へ ▶ (Right)",
-        "保存": "保存 (Ctrl+S)",
-        "プレビュー": "プレビュー (Tab)",
-        "自動検出": "自動検出 (D)",
+        "ペン": f"ペン ({key_text(Qt.Key.Key_1)})",
+        "矩形": f"矩形 ({key_text(Qt.Key.Key_2)})",
+        "◀ 前へ": f"◀ 前へ ({key_text(Qt.Key.Key_Left)})",
+        "次へ ▶": f"次へ ▶ ({key_text(Qt.Key.Key_Right)})",
+        "保存": f"保存 ({key_text(QKeySequence.StandardKey.Save)})",
+        "プレビュー": f"プレビュー ({key_text(Qt.Key.Key_Tab)})",
+        "自動検出": f"自動検出 ({key_text(Qt.Key.Key_D)})",
     }
     tooltips = {
         act.text(): act.toolTip()
