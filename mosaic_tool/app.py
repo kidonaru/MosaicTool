@@ -220,8 +220,9 @@ class MainWindow(QMainWindow):
         tb.add_separator()
         # 自動検出: 専用ウィンドウでモデルと信頼度を選んでから実行する
         self._detect_act = QAction("自動検出", self)
+        self._detect_act.setCheckable(True)
         self._add_shortcut(self._detect_act, QKeySequence(Qt.Key.Key_D))
-        self._detect_act.triggered.connect(self._open_detect_window)
+        self._detect_act.toggled.connect(self._on_detect_toggled)
         tb.addAction(self._detect_act)
 
     def _on_block_changed(self, value: int) -> None:
@@ -449,14 +450,29 @@ class MainWindow(QMainWindow):
 
     # --- 自動検出 ---
 
-    def _open_detect_window(self) -> None:
+    def _on_detect_toggled(self, checked: bool) -> None:
+        """ツールバーのトグルに合わせて自動検出ウィンドウを開閉する"""
+        if not checked:
+            if self._detect_window is not None:
+                self._detect_window.close()
+            return
+        if not self._open_detect_window():
+            # 開けなかったときはトグルを戻す(再入時は checked=False で何もしない)
+            self._detect_act.setChecked(False)
+
+    def _sync_detect_act(self) -> None:
+        """ウィンドウが閉じられたらトグルの状態を合わせる"""
+        self._detect_act.setChecked(False)
+
+    def _open_detect_window(self) -> bool:
         """自動検出ウィンドウを開く(2 回目以降は前面に出す)
 
         推論環境が無いうちはウィンドウで何もできないため、先にセットアップを出す。
+        開けたかどうかを返す。
         """
         if not detect_paths.is_runtime_ready():
             if RuntimeSetupDialog(self).exec() != QDialog.DialogCode.Accepted:
-                return
+                return False
         if self._detect_window is None:
             window = DetectWindow(self._settings, self)
             window.detect_requested.connect(self._start_detect)
@@ -464,12 +480,15 @@ class MainWindow(QMainWindow):
             window.classes_requested.connect(self._worker.request_classes)
             # モデルの顔ぶれが変わったらワーカーを畳み、次回に新しい構成で起動させる
             window.models_changed.connect(self._worker.stop)
+            # ウィンドウ側の × で閉じたときもトグルを戻す
+            window.finished.connect(self._sync_detect_act)
             self._detect_window = window
         self._detect_window.set_image_available(bool(self._images))
         self._detect_window.refresh()
         self._detect_window.show()
         self._detect_window.raise_()
         self._detect_window.activateWindow()
+        return True
 
     def _start_detect(self, models: dict) -> None:
         """表示中の画像に対して自動検出を実行する"""

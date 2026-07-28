@@ -177,9 +177,25 @@ def test_detect_action_opens_the_window(window):
 def test_detect_window_is_reused(window):
     window._detect_act.trigger()
     first = window._detect_window
-    window._detect_act.trigger()
+    window._detect_act.trigger()  # 一度閉じる
+    window._detect_act.trigger()  # 開き直しても同じインスタンス
     assert window._detect_window is first
     first.close()
+
+
+def test_detect_action_toggles_the_window(window):
+    window._detect_act.trigger()
+    assert window._detect_act.isChecked() is True
+    assert window._detect_window.isVisible() is True
+    window._detect_act.trigger()
+    assert window._detect_act.isChecked() is False
+    assert window._detect_window.isVisible() is False
+
+
+def test_closing_the_detect_window_unchecks_the_action(window):
+    window._detect_act.trigger()
+    window._detect_window.close()
+    assert window._detect_act.isChecked() is False
 
 
 def test_detect_window_learns_whether_an_image_is_open(window):
@@ -372,6 +388,7 @@ def test_detect_action_opens_setup_first_when_runtime_is_missing(window, monkeyp
     assert opened
     # セットアップを断ったら検出ウィンドウは出さない(構築前は何もできない)
     assert window._detect_window is None
+    assert window._detect_act.isChecked() is False
 
 
 def test_detect_window_opens_after_a_successful_setup(window, monkeypatch):
