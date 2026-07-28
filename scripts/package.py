@@ -17,6 +17,7 @@ from pathlib import Path
 
 import appinfo
 import build
+import macos_sign
 
 PLATFORM_TAGS = {"win32": "win-x64", "darwin": "mac-arm64"}
 
@@ -111,6 +112,9 @@ def main() -> None:
     stage_root = root / "build" / "package"
     shutil.rmtree(stage_root, ignore_errors=True)
     stage_dir = stage_root / name
+    if sys.platform == "darwin":
+        # 公証と staple は zip に固める前に .app へ適用する
+        macos_sign.notarize_and_staple(app)
     stage(app, stage_dir)
 
     # 旧バージョンの zip を消す(release.yml が dist/*.zip で拾うため)
