@@ -26,7 +26,8 @@ _KEY_PEN_WIDTH = "tool/pen_width"
 _KEY_AUTOSAVE = "save/autosave"
 _KEY_MODE = "tool/mode"
 _KEY_GEOMETRY = "window/geometry"
-_KEY_CONFIDENCE = "detect/confidence"
+# モデル別設定のキー接頭辞(<接頭辞>/<ファイル名>/<項目> で 1 モデル分になる)
+_KEY_MODEL_PREFIX = "detect/models"
 _KEY_DEVICE = "detect/device"
 
 
@@ -96,11 +97,38 @@ class AppSettings:
 
     # --- 自動検出 ---
 
-    def confidence(self, minimum: int, maximum: int) -> int:
-        return self._int(_KEY_CONFIDENCE, DEFAULT_CONFIDENCE, minimum, maximum)
+    def _model_key(self, filename: str, item: str) -> str:
+        """モデル別設定のキー(ファイル名をそのまま含める)"""
+        return f"{_KEY_MODEL_PREFIX}/{filename}/{item}"
 
-    def set_confidence(self, value: int) -> None:
-        self._qsettings.setValue(_KEY_CONFIDENCE, int(value))
+    def model_enabled(self, filename: str) -> bool:
+        """検出に使うか。未登録のモデルは有効として扱う
+
+        ユーザーが models\\ へ置いたものは使いたくて置いたはずで、
+        初期状態で無効だと「置いたのに動かない」という戸惑いを生む。
+        """
+        value = self._qsettings.value(self._model_key(filename, "enabled"), True)
+        if isinstance(value, str):
+            return value.lower() in ("true", "1")
+        return bool(value)
+
+    def set_model_enabled(self, filename: str, value: bool) -> None:
+        self._qsettings.setValue(self._model_key(filename, "enabled"), bool(value))
+
+    def model_confidence(
+        self,
+        filename: str,
+        minimum: int,
+        maximum: int,
+        default: int = DEFAULT_CONFIDENCE,
+    ) -> int:
+        """モデルごとの信頼度しきい値 (%)。未登録ならカタログの推奨値(default)"""
+        return self._int(
+            self._model_key(filename, "confidence"), default, minimum, maximum
+        )
+
+    def set_model_confidence(self, filename: str, value: int) -> None:
+        self._qsettings.setValue(self._model_key(filename, "confidence"), int(value))
 
     def device(self) -> str:
         value = str(self._qsettings.value(_KEY_DEVICE, DEFAULT_DEVICE))

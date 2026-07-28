@@ -7,7 +7,7 @@ from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QKeySequence
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from PySide6.QtWidgets import QApplication, QToolBar  # noqa: E402
+from PySide6.QtWidgets import QApplication, QDialog, QToolBar  # noqa: E402
 
 from PIL import Image  # noqa: E402
 
@@ -18,6 +18,16 @@ from mosaic_tool.settings import AppSettings  # noqa: E402
 @pytest.fixture(scope="module")
 def qapp():
     return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def runtime_ready(monkeypatch):
+    """推論環境ありを既定にする
+
+    未構築だと自動検出がセットアップダイアログを開いて止まるため。
+    未構築の挙動を見るテストは各自で False へ上書きする。
+    """
+    monkeypatch.setattr("mosaic_tool.app.detect_paths.is_runtime_ready", lambda: True)
 
 
 @pytest.fixture
@@ -106,23 +116,6 @@ def test_detect_action_shortcut_is_d(window):
     assert window._detect_act.shortcut() == QKeySequence(Qt.Key.Key_D)
 
 
-def test_confidence_spin_restores_setting(qapp, tmp_path):
-    settings = AppSettings(
-        QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat)
-    )
-    settings.set_confidence(40)
-    win = MainWindow(settings=settings)
-    try:
-        assert win._confidence_spin.value() == 40
-    finally:
-        win.close()
-
-
-def test_confidence_change_is_saved(window):
-    window._confidence_spin.setValue(55)
-    assert window._settings.confidence(1, 100) == 55
-
-
 def test_detected_regions_are_added_to_canvas(window):
     window._on_detected([{"bbox": [0, 0, 10, 10]}, {"bbox": [20, 0, 30, 10]}])
     assert len(window.canvas.get_regions()) == 2
@@ -149,25 +142,105 @@ def test_detect_failure_shows_error(window, monkeypatch):
     assert shown and "モデルの読み込み" in shown[0]
 
 
-def test_detect_without_models_warns_and_does_not_start(window, monkeypatch):
-    monkeypatch.setattr("mosaic_tool.app.detect_paths.is_runtime_ready", lambda: True)
-    monkeypatch.setattr("mosaic_tool.app.detect_paths.model_files", lambda: [])
-    warned = []
-    monkeypatch.setattr(window, "_warn_models_missing", lambda: warned.append(True))
-    requested = []
-    monkeypatch.setattr(window._worker, "request", lambda *a: requested.append(a))
-    window._on_detect()
-    assert warned and not requested
+def test_toolbar_has_no_confidence_spinbox(window):
+    # 信頼度はモデルごとの設定に一本化した
+    assert not hasattr(window, "_confidence_spin")
 
 
-def test_detect_starts_worker_when_ready(window, monkeypatch):
-    monkeypatch.setattr("mosaic_tool.app.detect_paths.is_runtime_ready", lambda: True)
+def test_detect_action_opens_the_window(window):
+    window._detect_act.trigger()
+    assert window._detect_window is not None
+    assert window._detect_window.isVisible() is True
+    window._detect_window.close()
+
+
+def test_detect_window_is_reused(window):
+    window._detect_act.trigger()
+    first = window._detect_window
+    window._detect_act.trigger()
+    assert window._detect_window is first
+    first.close()
+
+
+def test_detect_window_learns_whether_an_image_is_open(window):
+    window._detect_act.trigger()
+    # フィクスチャは画像 2 枚を開いた状態
+    assert window._detect_window._image_available is True
+    window._detect_window.close()
+
+
+def test_start_detect_sends_the_models_to_the_worker(window, monkeypatch):
+    sent = []
     monkeypatch.setattr(
-        "mosaic_tool.app.detect_paths.model_files", lambda: [Path("dummy.pt")]
+        window._worker,
+        "request",
+        lambda image, models, device: sent.append((image, models, device)),
     )
-    requested = []
-    monkeypatch.setattr(window._worker, "request", lambda *a: requested.append(a))
-    window._on_detect()
-    assert len(requested) == 1
-    # (画像パス, 信頼度 0.0-1.0, デバイス)
-    assert requested[0][1] == window._confidence_spin.value() / 100
+    window._detect_act.trigger()
+    window._start_detect({"a.pt": 0.25})
+    assert sent and sent[0][1] == {"a.pt": 0.25}
+    window._detect_window.close()
+
+
+def test_detect_failure_restores_the_window(window, monkeypatch):
+    monkeypatch.setattr(
+        "mosaic_tool.app.QMessageBox.critical", lambda *args, **kwargs: None
+    )
+    window._detect_act.trigger()
+    window._detect_window.set_running(True)
+    window._on_detect_failed("検出に失敗しました")
+    assert window._detect_window._running is False
+    window._detect_window.close()
+
+
+def test_closing_the_main_window_closes_the_detect_window(window):
+    window._detect_act.trigger()
+    detect_window = window._detect_window
+    window.close()
+    assert detect_window.isVisible() is False
+
+
+def test_detect_action_opens_setup_first_when_runtime_is_missing(window, monkeypatch):
+    # 未構築なら検出ウィンドウより先にセットアップを出す
+    monkeypatch.setattr("mosaic_tool.app.detect_paths.is_runtime_ready", lambda: False)
+    opened = []
+
+    class FakeSetupDialog:
+        def __init__(self, parent=None):
+            opened.append(True)
+
+        def exec(self):
+            return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr("mosaic_tool.app.RuntimeSetupDialog", FakeSetupDialog)
+    window._detect_act.trigger()
+    assert opened
+    # セットアップを断ったら検出ウィンドウは出さない(構築前は何もできない)
+    assert window._detect_window is None
+
+
+def test_detect_window_opens_after_a_successful_setup(window, monkeypatch):
+    monkeypatch.setattr("mosaic_tool.app.detect_paths.is_runtime_ready", lambda: False)
+
+    class FakeSetupDialog:
+        def __init__(self, parent=None):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr("mosaic_tool.app.RuntimeSetupDialog", FakeSetupDialog)
+    window._detect_act.trigger()
+    assert window._detect_window is not None
+    window._detect_window.close()
+
+
+def test_setup_is_not_shown_when_the_runtime_is_ready(window, monkeypatch):
+    monkeypatch.setattr("mosaic_tool.app.detect_paths.is_runtime_ready", lambda: True)
+    opened = []
+    monkeypatch.setattr(
+        "mosaic_tool.app.RuntimeSetupDialog", lambda parent=None: opened.append(True)
+    )
+    window._detect_act.trigger()
+    assert opened == []
+    window._detect_window.close()

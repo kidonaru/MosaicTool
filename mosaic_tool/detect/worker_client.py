@@ -40,14 +40,14 @@ class DetectWorker(QObject):
     次のリクエストで黙って起動し直す。
     """
 
-    detected = Signal(list)   # 検出結果 (list[dict])
-    failed = Signal(str)      # エラーメッセージ
+    detected = Signal(list)              # 検出結果 (list[dict])
+    progress = Signal(int, int, str)     # (完了数, 総数, モデル名)
+    failed = Signal(str)                 # エラーメッセージ
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
         self._process: QProcess | None = None
         self._buffer = ""
-        self._ready = False
         self._busy = False
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
@@ -57,26 +57,32 @@ class DetectWorker(QObject):
     def is_busy(self) -> bool:
         return self._busy
 
-    def request(self, image_path: str, conf: float, device: str) -> None:
-        """検出を依頼する(結果は detected / failed で返る)"""
+    def request(self, image_path: str, models: dict, device: str) -> None:
+        """検出を依頼する(結果は detected / failed で返る)
+
+        models はファイル名をキー、信頼度(0〜1)を値とする。
+        ワーカーは models\\ を全件読み込むが、推論するのはここに載せたものだけ。
+        """
         if self._busy:
             return
-        models = paths.model_files()
         if not models:
+            self.failed.emit("有効な検出モデルがありません")
+            return
+        available = paths.model_files()
+        if not available:
             self.failed.emit(f"検出モデルが見つかりません: {paths.models_dir()}")
             return
-        if self._process is None and not self._start(models):
+        if self._process is None and not self._start(available):
             return
         self._busy = True
         self._timer.start()
-        self._process.write(build_request(image_path, conf, device).encode("utf-8"))
+        self._process.write(build_request(image_path, models, device).encode("utf-8"))
 
     def stop(self) -> None:
         """ワーカーを終了する(アプリ終了時に呼ぶ)"""
         self._timer.stop()
         process, self._process = self._process, None
         self._busy = False
-        self._ready = False
         self._buffer = ""
         if process is None:
             return
@@ -101,7 +107,6 @@ class DetectWorker(QObject):
             return False
         self._process = process
         self._buffer = ""
-        self._ready = False
         return True
 
     def _on_stdout(self) -> None:
@@ -121,17 +126,19 @@ class DetectWorker(QObject):
 
     def _handle_line(self, line: str) -> None:
         try:
-            detections = parse_response(line)
+            response = parse_response(line)
         except DetectError as e:
             self._finish_request()
             self.failed.emit(str(e))
             return
-        if not self._ready:
-            # 起動直後の 1 行はモデル読み込み完了の通知
-            self._ready = True
+        if response.ready:
+            # 起動直後のモデル読み込み完了通知。待っている呼び出し元は無い
+            return
+        if response.progress is not None:
+            self.progress.emit(*response.progress)
             return
         self._finish_request()
-        self.detected.emit(detections)
+        self.detected.emit(response.detections or [])
 
     def _finish_request(self) -> None:
         self._busy = False
@@ -151,7 +158,6 @@ class DetectWorker(QObject):
                 "utf-8", errors="replace"
             )[-STDERR_TAIL:]
         self._process = None
-        self._ready = False
         self._finish_request()
         if was_busy:
             self.failed.emit(

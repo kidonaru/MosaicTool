@@ -4,11 +4,10 @@ import json
 import pytest
 from PySide6.QtCore import QPointF
 
+from mosaic_tool.detect import convert
 from mosaic_tool.detect.convert import (
     DetectError,
-    build_request,
     detections_to_regions,
-    parse_response,
     thin_points,
 )
 from mosaic_tool.regions import RegionKind
@@ -16,26 +15,63 @@ from mosaic_tool.regions import RegionKind
 IMAGE_SIZE = (1000, 1000)
 
 
-def test_build_request_is_one_json_line():
-    line = build_request("C:/img.png", 0.25, "cpu")
+def test_build_request_carries_per_model_confidence():
+    line = convert.build_request("a.png", {"m1.pt": 0.25, "m2.pt": 0.4}, "cpu")
     assert line.endswith("\n")
-    assert json.loads(line) == {"image": "C:/img.png", "conf": 0.25, "device": "cpu"}
+    payload = json.loads(line)
+    assert payload == {
+        "image": "a.png",
+        "models": {"m1.pt": 0.25, "m2.pt": 0.4},
+        "device": "cpu",
+    }
 
 
-def test_parse_response_returns_detections():
-    line = json.dumps({"ok": True, "detections": [{"bbox": [0, 0, 10, 10]}]})
-    assert parse_response(line) == [{"bbox": [0, 0, 10, 10]}]
+def test_build_request_keeps_non_ascii_filenames_readable():
+    line = convert.build_request("画像.png", {"モデル.pt": 0.3}, "")
+    assert "画像.png" in line
 
 
-def test_parse_response_raises_on_error_response():
-    line = json.dumps({"ok": False, "error": "モデルが壊れています"})
-    with pytest.raises(DetectError, match="モデルが壊れています"):
-        parse_response(line)
+def test_parse_response_reports_ready():
+    res = convert.parse_response(json.dumps({"ok": True, "ready": True}))
+    assert res.ready is True
+    assert res.detections is None
+    assert res.progress is None
+
+
+def test_parse_response_reports_progress():
+    line = json.dumps(
+        {"ok": True, "progress": {"done": 1, "total": 3, "model": "m1.pt"}}
+    )
+    res = convert.parse_response(line)
+    assert res.progress == (1, 3, "m1.pt")
+    assert res.detections is None
+
+
+def test_parse_response_reports_detections():
+    line = json.dumps({"ok": True, "detections": [{"bbox": [0, 0, 1, 1]}]})
+    res = convert.parse_response(line)
+    assert res.detections == [{"bbox": [0, 0, 1, 1]}]
+    assert res.ready is False
+
+
+def test_parse_response_treats_missing_detections_as_empty():
+    res = convert.parse_response(json.dumps({"ok": True}))
+    assert res.detections == []
+
+
+def test_parse_response_raises_on_error_payload():
+    with pytest.raises(DetectError, match="推論に失敗"):
+        convert.parse_response(json.dumps({"ok": False, "error": "推論に失敗"}))
 
 
 def test_parse_response_raises_on_broken_json():
     with pytest.raises(DetectError):
-        parse_response("これは JSON ではない")
+        convert.parse_response("{壊れた")
+
+
+def test_parse_response_raises_on_non_object_payload():
+    with pytest.raises(DetectError):
+        convert.parse_response("[1, 2, 3]")
 
 
 def test_polygon_detection_becomes_polygon_region():

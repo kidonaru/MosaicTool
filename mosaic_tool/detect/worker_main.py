@@ -12,9 +12,6 @@ import json
 import sys
 from pathlib import Path
 
-DEFAULT_CONFIDENCE = 0.25
-
-
 def load_models(model_paths: list[str]) -> list[tuple]:
     """モデルを読み込む((表示名, モデル) の列を返す)"""
     from ultralytics import YOLO
@@ -22,12 +19,28 @@ def load_models(model_paths: list[str]) -> list[tuple]:
     return [(Path(p).name, YOLO(p)) for p in model_paths]
 
 
-def detect(models: list[tuple], image_path: str, conf: float, device: str) -> list[dict]:
-    """全モデルで推論し、検出を 1 つの列にまとめて返す"""
+def detect(
+    models: list[tuple],
+    image_path: str,
+    confidences: dict,
+    device: str,
+    on_progress=None,
+) -> list[dict]:
+    """指定されたモデルだけで推論し、検出を 1 つの列にまとめて返す
+
+    confidences はファイル名をキー、信頼度(0〜1)を値とする。
+    ここに無いモデルは読み込み済みでも推論しない。
+    """
+    targets = [(name, model) for name, model in models if name in confidences]
     detections: list[dict] = []
-    for name, model in models:
+    for done, (name, model) in enumerate(targets, start=1):
         # device が空なら ultralytics の自動選択に任せる
-        result = model(image_path, conf=conf, device=device or None, verbose=False)[0]
+        result = model(
+            image_path,
+            conf=confidences[name],
+            device=device or None,
+            verbose=False,
+        )[0]
         polygons = result.masks.xy if result.masks is not None else None
         for i, box in enumerate(result.boxes):
             item = {
@@ -39,18 +52,30 @@ def detect(models: list[tuple], image_path: str, conf: float, device: str) -> li
             if polygons is not None and i < len(polygons):
                 item["polygon"] = [[float(x), float(y)] for x, y in polygons[i]]
             detections.append(item)
+        if on_progress is not None:
+            on_progress(done, len(targets), name)
     return detections
 
 
-def handle_request(models: list[tuple], line: str) -> dict:
-    """リクエスト 1 行を処理して応答の中身を返す(失敗しても例外を外へ出さない)"""
+def handle_request(models: list[tuple], line: str, emit) -> dict:
+    """リクエスト 1 行を処理して最終応答を返す(失敗しても例外を外へ出さない)
+
+    emit はモデル 1 件の推論が終わるたびに進捗の応答で呼ばれる。
+    """
     try:
         request = json.loads(line)
+        confidences = {
+            str(name): float(conf)
+            for name, conf in (request.get("models") or {}).items()
+        }
         detections = detect(
             models,
             request["image"],
-            float(request.get("conf", DEFAULT_CONFIDENCE)),
+            confidences,
             request.get("device", ""),
+            on_progress=lambda done, total, name: emit(
+                {"ok": True, "progress": {"done": done, "total": total, "model": name}}
+            ),
         )
         return {"ok": True, "detections": detections}
     except Exception as e:
@@ -75,7 +100,7 @@ def main(argv: list[str]) -> int:
     _emit({"ok": True, "ready": True})
     for line in sys.stdin:
         if line.strip():
-            _emit(handle_request(models, line))
+            _emit(handle_request(models, line, _emit))
     return 0
 
 

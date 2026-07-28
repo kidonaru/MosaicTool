@@ -61,20 +61,39 @@ def test_block_off_step_falls_back_to_default(tmp_path):
     assert s.block(5, 100, 5) == DEFAULT_BLOCK
 
 
-def test_confidence_defaults_to_25(tmp_path):
-    assert _settings(tmp_path).confidence(1, 100) == DEFAULT_CONFIDENCE
+def test_model_settings_default_to_enabled_with_given_default(tmp_path):
+    s = _settings(tmp_path)
+    # 未登録のモデルは「有効・呼び出し側の既定値」として扱う
+    assert s.model_enabled("Anzhc Eyes -seg-hd.pt") is True
+    assert s.model_confidence("Anzhc Eyes -seg-hd.pt", 1, 100, 40) == 40
 
 
-def test_confidence_roundtrip(tmp_path):
-    settings = _settings(tmp_path)
-    settings.set_confidence(40)
-    assert settings.confidence(1, 100) == 40
+def test_model_confidence_falls_back_to_the_shared_default(tmp_path):
+    s = _settings(tmp_path)
+    assert s.model_confidence("unknown.pt", 1, 100) == DEFAULT_CONFIDENCE
 
 
-def test_confidence_out_of_range_falls_back_to_default(tmp_path):
-    settings = _settings(tmp_path)
-    settings.set_confidence(500)
-    assert settings.confidence(1, 100) == DEFAULT_CONFIDENCE
+def test_model_settings_roundtrip(tmp_path):
+    name = "Anzhc Face seg 640 v4 y11n.pt"
+    s = _settings(tmp_path)
+    s.set_model_enabled(name, False)
+    s.set_model_confidence(name, 33)
+    s2 = _settings(tmp_path)
+    assert s2.model_enabled(name) is False
+    assert s2.model_confidence(name, 1, 100, 25) == 33
+
+
+def test_model_settings_are_kept_per_file(tmp_path):
+    s = _settings(tmp_path)
+    s.set_model_enabled("a.pt", False)
+    assert s.model_enabled("b.pt") is True
+
+
+def test_model_confidence_out_of_range_falls_back_to_default(tmp_path):
+    name = "a.pt"
+    s = _settings(tmp_path)
+    s.set_model_confidence(name, 500)
+    assert s.model_confidence(name, 1, 100, 25) == 25
 
 
 def test_device_defaults_to_auto(tmp_path):

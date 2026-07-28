@@ -13,6 +13,11 @@ def test_venv_command_pins_python_version():
     assert cmd[-2:] == ["--python", runtime.PYTHON_VERSION]
 
 
+def test_venv_command_recreates_existing_venv():
+    """既存の runtime/ があっても再セットアップできること"""
+    assert "--clear" in runtime.venv_command(UV, RUNTIME)
+
+
 def test_install_command_targets_the_venv():
     cmd = runtime.install_command(UV, RUNTIME, use_gpu=False)
     assert cmd[:3] == [str(UV), "pip", "install"]

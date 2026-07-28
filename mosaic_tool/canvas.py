@@ -609,14 +609,13 @@ class MosaicCanvas(QGraphicsView):
         """複数の範囲をまとめて追加する(自動検出用)
 
         Undo スタックには 1 エントリだけ積み、Ctrl+Z 一回で追加分をまとめて
-        取り消せるようにする。追加分だけを選択状態にして、どれが増えたか分かるようにする。
+        取り消せるようにする。追加分は非選択のまま置く(選択したままだと
+        次の操作で自動検出の結果を丸ごと動かしてしまう)。
         """
         if not regions:
             return []
         self._scene.clearSelection()
         items = [self.add_region(region, push_undo=False) for region in regions]
-        for item in items:
-            item.setSelected(True)
         self._undo_stack.append(("add_many", items))
         return items
 

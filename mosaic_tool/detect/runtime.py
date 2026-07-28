@@ -16,8 +16,11 @@ TORCH_CUDA_INDEX_URL = "https://download.pytorch.org/whl/cu121"
 
 
 def venv_command(uv: Path, runtime: Path) -> list[str]:
-    """runtime/ に venv を作るコマンド"""
-    return [str(uv), "venv", str(runtime), "--python", PYTHON_VERSION]
+    """runtime/ に venv を作るコマンド
+
+    再セットアップ時に既存の venv が残っていても失敗しないよう --clear で作り直す。
+    """
+    return [str(uv), "venv", str(runtime), "--clear", "--python", PYTHON_VERSION]
 
 
 def install_command(uv: Path, runtime: Path, use_gpu: bool) -> list[str]:

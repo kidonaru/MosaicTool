@@ -123,13 +123,22 @@ def test_add_regions_keeps_existing_regions(qapp):
     assert len(canvas.get_regions()) == 1
 
 
-def test_add_regions_selects_only_added_regions(qapp):
+def test_add_regions_leaves_items_unselected(qapp):
+    # 自動検出の追加分は非選択。意図せず全体を動かしてしまう事故を防ぐ
     canvas = _canvas_with_image(qapp)
     old = canvas.add_region(_rect_region(100))
     old.setSelected(True)
-    items = canvas.add_regions([_rect_region(0)])
-    assert items[0].isSelected()
+    items = canvas.add_regions([_rect_region(0), _rect_region(20)])
+    assert items and all(not item.isSelected() for item in items)
     assert not old.isSelected()
+
+
+def test_add_region_keeps_selection_for_manual_drawing(qapp):
+    # 手描き直後の選択はそのまま(描いてすぐ変形できるようにする)
+    canvas = _canvas_with_image(qapp)
+    item = canvas.add_region(_rect_region(0))
+    item.setSelected(True)
+    assert item.isSelected()
 
 
 def test_add_regions_with_empty_list_pushes_no_undo(qapp):

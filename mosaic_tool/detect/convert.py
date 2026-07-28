@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import dataclass
 
 from PySide6.QtCore import QPointF, QRectF
 
@@ -19,14 +20,27 @@ class DetectError(Exception):
     """ワーカーからのエラー応答、または応答を解釈できなかったことを表す"""
 
 
-def build_request(image_path: str, conf: float, device: str) -> str:
-    """ワーカーへ送るリクエスト 1 行(改行付き)を組み立てる"""
-    payload = {"image": image_path, "conf": conf, "device": device}
+@dataclass(frozen=True)
+class WorkerResponse:
+    """ワーカーの応答 1 行の中身(3 種のうちどれか 1 つだけが埋まる)"""
+
+    ready: bool = False
+    progress: tuple[int, int, str] | None = None   # (完了数, 総数, モデル名)
+    detections: list[dict] | None = None
+
+
+def build_request(image_path: str, models: dict[str, float], device: str) -> str:
+    """ワーカーへ送るリクエスト 1 行(改行付き)を組み立てる
+
+    models はファイル名をキー、信頼度(0〜1)を値とする。
+    ここに載っていないモデルはワーカー側で推論されない。
+    """
+    payload = {"image": image_path, "models": models, "device": device}
     return json.dumps(payload, ensure_ascii=False) + "\n"
 
 
-def parse_response(line: str) -> list[dict]:
-    """ワーカーの応答 1 行を解釈して検出リストを返す"""
+def parse_response(line: str) -> WorkerResponse:
+    """ワーカーの応答 1 行を解釈する(失敗は DetectError)"""
     try:
         payload = json.loads(line)
     except (ValueError, TypeError) as e:
@@ -35,7 +49,18 @@ def parse_response(line: str) -> list[dict]:
         raise DetectError(f"検出結果の形式が不正です: {line[:200]}")
     if not payload.get("ok"):
         raise DetectError(payload.get("error") or "検出に失敗しました")
-    return payload.get("detections", [])
+    if payload.get("ready"):
+        return WorkerResponse(ready=True)
+    progress = payload.get("progress")
+    if isinstance(progress, dict):
+        return WorkerResponse(
+            progress=(
+                int(progress.get("done", 0)),
+                int(progress.get("total", 0)),
+                str(progress.get("model", "")),
+            )
+        )
+    return WorkerResponse(detections=payload.get("detections", []))
 
 
 def thin_points(points: list[QPointF], min_distance: float) -> list[QPointF]:

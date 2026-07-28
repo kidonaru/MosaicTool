@@ -37,7 +37,9 @@ def test_worker_does_not_import_mosaic_tool():
 
 def test_detect_returns_bbox_and_model_name():
     model = FakeModel(FakeResult([FakeBox(0.9, [1, 2, 3, 4])]))
-    result = worker_main.detect([("pussyV2.pt", model)], "img.png", 0.25, "")
+    result = worker_main.detect(
+        [("pussyV2.pt", model)], "img.png", {"pussyV2.pt": 0.25}, ""
+    )
     assert result == [
         {"model": "pussyV2.pt", "conf": 0.9, "bbox": [1.0, 2.0, 3.0, 4.0]}
     ]
@@ -47,28 +49,58 @@ def test_detect_includes_polygon_when_masks_exist():
     model = FakeModel(
         FakeResult([FakeBox(0.9, [0, 0, 10, 10])], polygons=[[(0, 0), (10, 0), (10, 10)]])
     )
-    result = worker_main.detect([("m.pt", model)], "img.png", 0.25, "")
+    result = worker_main.detect([("m.pt", model)], "img.png", {"m.pt": 0.25}, "")
     assert result[0]["polygon"] == [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]]
 
 
 def test_detect_combines_multiple_models():
     a = FakeModel(FakeResult([FakeBox(0.9, [0, 0, 1, 1])]))
     b = FakeModel(FakeResult([FakeBox(0.8, [2, 2, 3, 3])]))
-    result = worker_main.detect([("a.pt", a), ("b.pt", b)], "img.png", 0.3, "cpu")
+    result = worker_main.detect(
+        [("a.pt", a), ("b.pt", b)], "img.png", {"a.pt": 0.3, "b.pt": 0.3}, "cpu"
+    )
     assert [d["model"] for d in result] == ["a.pt", "b.pt"]
 
 
-def test_detect_passes_conf_and_device_to_model():
-    model = FakeModel(FakeResult([]))
-    worker_main.detect([("m.pt", model)], "img.png", 0.4, "cpu")
-    assert model.calls[0]["conf"] == 0.4
-    assert model.calls[0]["device"] == "cpu"
+def test_detect_uses_the_confidence_of_each_model():
+    a = FakeModel(FakeResult([]))
+    b = FakeModel(FakeResult([]))
+    worker_main.detect(
+        [("a.pt", a), ("b.pt", b)], "img.png", {"a.pt": 0.25, "b.pt": 0.4}, ""
+    )
+    assert a.calls[0]["conf"] == 0.25
+    assert b.calls[0]["conf"] == 0.4
+
+
+def test_detect_skips_models_not_listed():
+    used = FakeModel(FakeResult([FakeBox(0.9, [0, 0, 1, 1])]))
+    unused = FakeModel(FakeResult([FakeBox(0.9, [2, 2, 3, 3])]))
+    result = worker_main.detect(
+        [("used.pt", used), ("unused.pt", unused)], "img.png", {"used.pt": 0.3}, ""
+    )
+    assert unused.calls == []
+    assert [d["model"] for d in result] == ["used.pt"]
+
+
+def test_detect_reports_progress_per_model():
+    a = FakeModel(FakeResult([]))
+    b = FakeModel(FakeResult([]))
+    seen = []
+    worker_main.detect(
+        [("a.pt", a), ("b.pt", b), ("skip.pt", FakeModel(FakeResult([])))],
+        "img.png",
+        {"a.pt": 0.3, "b.pt": 0.3},
+        "",
+        on_progress=lambda done, total, name: seen.append((done, total, name)),
+    )
+    # 総数は推論するモデルの件数(除外分は数えない)
+    assert seen == [(1, 2, "a.pt"), (2, 2, "b.pt")]
 
 
 def test_empty_device_is_passed_as_none():
     # 空文字は ultralytics へ渡さず自動選択に任せる
     model = FakeModel(FakeResult([]))
-    worker_main.detect([("m.pt", model)], "img.png", 0.4, "")
+    worker_main.detect([("m.pt", model)], "img.png", {"m.pt": 0.4}, "")
     assert model.calls[0]["device"] is None
 
 
@@ -78,7 +110,9 @@ def test_handle_request_returns_error_payload_on_failure():
             raise RuntimeError("推論に失敗")
 
     payload = worker_main.handle_request(
-        [("m.pt", BrokenModel())], '{"image": "img.png", "conf": 0.25}'
+        [("m.pt", BrokenModel())],
+        '{"image": "img.png", "models": {"m.pt": 0.25}}',
+        lambda _payload: None,
     )
     assert payload["ok"] is False
     assert "推論に失敗" in payload["error"]
@@ -87,7 +121,31 @@ def test_handle_request_returns_error_payload_on_failure():
 def test_handle_request_returns_detections():
     model = FakeModel(FakeResult([FakeBox(0.9, [0, 0, 1, 1])]))
     payload = worker_main.handle_request(
-        [("m.pt", model)], '{"image": "img.png", "conf": 0.25, "device": ""}'
+        [("m.pt", model)],
+        '{"image": "img.png", "models": {"m.pt": 0.25}, "device": ""}',
+        lambda _payload: None,
     )
     assert payload["ok"] is True
     assert len(payload["detections"]) == 1
+
+
+def test_handle_request_emits_progress_payloads():
+    emitted = []
+    model = FakeModel(FakeResult([]))
+    worker_main.handle_request(
+        [("m.pt", model)],
+        '{"image": "img.png", "models": {"m.pt": 0.25}}',
+        emitted.append,
+    )
+    assert emitted == [
+        {"ok": True, "progress": {"done": 1, "total": 1, "model": "m.pt"}}
+    ]
+
+
+def test_handle_request_without_models_returns_empty_detections():
+    model = FakeModel(FakeResult([FakeBox(0.9, [0, 0, 1, 1])]))
+    payload = worker_main.handle_request(
+        [("m.pt", model)], '{"image": "img.png", "models": {}}', lambda _p: None
+    )
+    assert payload["detections"] == []
+    assert model.calls == []

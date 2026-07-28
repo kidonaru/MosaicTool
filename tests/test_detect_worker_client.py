@@ -91,3 +91,44 @@ def test_startup_error_is_reported_as_failure(qapp):
     worker.failed.connect(errors.append)
     worker._feed(json.dumps({"ok": False, "error": "モデルの読み込みに失敗しました"}) + "\n")
     assert errors and "モデルの読み込み" in errors[0]
+
+
+def test_feed_emits_progress(qapp):
+    worker = _worker(qapp)
+    seen = []
+    worker.progress.connect(lambda done, total, name: seen.append((done, total, name)))
+    worker._feed(json.dumps({"ok": True, "ready": True}) + "\n")
+    worker._feed(
+        json.dumps({"ok": True, "progress": {"done": 1, "total": 2, "model": "a.pt"}})
+        + "\n"
+    )
+    assert seen == [(1, 2, "a.pt")]
+
+
+def test_progress_is_not_reported_as_detection(qapp):
+    worker = _worker(qapp)
+    received = []
+    worker.detected.connect(received.append)
+    worker._feed(json.dumps({"ok": True, "ready": True}) + "\n")
+    worker._feed(
+        json.dumps({"ok": True, "progress": {"done": 1, "total": 1, "model": "a.pt"}})
+        + "\n"
+    )
+    assert received == []
+
+
+def test_detections_arrive_even_without_a_ready_line(qapp):
+    # 応答は種別で判別するため、ready の有無に依存しない
+    worker = _worker(qapp)
+    received = []
+    worker.detected.connect(received.append)
+    worker._feed(json.dumps({"ok": True, "detections": []}) + "\n")
+    assert received == [[]]
+
+
+def test_request_without_models_reports_failure(qapp):
+    worker = _worker(qapp)
+    errors = []
+    worker.failed.connect(errors.append)
+    worker.request("img.png", {}, "")
+    assert errors and "モデル" in errors[0]
