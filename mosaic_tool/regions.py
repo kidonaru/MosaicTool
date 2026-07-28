@@ -5,12 +5,17 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QPainterPath, QPainterPathStroker, QTransform
+from PySide6.QtGui import QPainterPath, QPainterPathStroker, QPolygonF, QTransform
+
+
+# 同じ範囲とみなす重なり率(外接矩形の IoU)
+DUPLICATE_IOU = 0.9
 
 
 class RegionKind(Enum):
     RECT = "rect"
     STROKE = "stroke"
+    POLYGON = "polygon"  # points を閉じた多角形として扱う(検出マスクの輪郭)
 
 
 @dataclass
@@ -31,6 +36,11 @@ class Region:
         path = QPainterPath()
         if self.kind is RegionKind.RECT:
             path.addRect(self.rect)
+            return path
+        if self.kind is RegionKind.POLYGON:
+            # 検出マスクの輪郭。始点と終点をつないだ閉じた図形にする
+            path.addPolygon(QPolygonF(self.points))
+            path.closeSubpath()
             return path
         # ストローク: 点列をつないだ折れ線を太らせた輪郭
         path.moveTo(self.points[0])
@@ -60,3 +70,35 @@ class Region:
     def image_path(self) -> QPainterPath:
         """画像座標での範囲パスを返す(マスク生成に使う)"""
         return self.image_transform().map(self.local_path())
+
+
+def _iou(a: QRectF, b: QRectF) -> float:
+    """外接矩形どうしの重なり率 (0.0〜1.0)"""
+    inter = a.intersected(b)
+    if inter.isEmpty():
+        return 0.0
+    intersection = inter.width() * inter.height()
+    union = a.width() * a.height() + b.width() * b.height() - intersection
+    if union <= 0:
+        return 0.0
+    return intersection / union
+
+
+def drop_duplicate_regions(
+    regions: list[Region], existing: list[Region], iou: float = DUPLICATE_IOU
+) -> list[Region]:
+    """既存とほぼ同じ位置・大きさの範囲を取り除いて返す
+
+    同じ画像に検出を繰り返したときや、複数のモデルが同じ対象を捉えたときに
+    同じ範囲が積み上がるのを防ぐ。判定は外接矩形の重なり率で行い、
+    残す側どうしの重複も 1 つに絞る。
+    """
+    bounds = [region.image_path().boundingRect() for region in existing]
+    kept: list[Region] = []
+    for region in regions:
+        rect = region.image_path().boundingRect()
+        if any(_iou(rect, other) >= iou for other in bounds):
+            continue
+        bounds.append(rect)
+        kept.append(region)
+    return kept

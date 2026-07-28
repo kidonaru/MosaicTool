@@ -1,12 +1,17 @@
 """MainWindow のプレビュー操作(Tab ショートカット・画像切替時の解除)の検証"""
 import os
+from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QKeySequence
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from PySide6.QtWidgets import QApplication, QToolBar  # noqa: E402
+from PySide6.QtWidgets import (  # noqa: E402
+    QApplication,
+    QDialog,
+    QMessageBox,
+)
 
 from PIL import Image  # noqa: E402
 
@@ -17,6 +22,16 @@ from mosaic_tool.settings import AppSettings  # noqa: E402
 @pytest.fixture(scope="module")
 def qapp():
     return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def runtime_ready(monkeypatch):
+    """推論環境ありを既定にする
+
+    未構築だと自動検出がセットアップダイアログを開いて止まるため。
+    未構築の挙動を見るテストは各自で False へ上書きする。
+    """
+    monkeypatch.setattr("mosaic_tool.app.detect_paths.is_runtime_ready", lambda: True)
 
 
 @pytest.fixture
@@ -47,13 +62,22 @@ def test_toolbar_actions_show_key_in_tooltip(window):
         "次へ ▶": "次へ ▶ (Right)",
         "保存": "保存 (Ctrl+S)",
         "プレビュー": "プレビュー (Tab)",
+        "自動検出": "自動検出 (D)",
     }
     tooltips = {
         act.text(): act.toolTip()
-        for act in window.findChild(QToolBar).actions()
+        for act in window._toolbar.actions()
         if act.text()
     }
     assert tooltips == expected
+
+
+def test_toolbar_wraps_when_width_is_not_enough(window):
+    """横幅が足りないときは項目を折り返して 2 行以上で表示する"""
+    layout = window._toolbar.layout()
+    wide = layout.heightForWidth(2000)
+    narrow = layout.heightForWidth(400)
+    assert narrow > wide
 
 
 def test_single_key_shortcuts_are_scoped_to_canvas(window):
@@ -65,7 +89,7 @@ def test_single_key_shortcuts_are_scoped_to_canvas(window):
     for act in window._mode_group.actions():
         assert act.shortcutContext() == scoped
     save_act = next(
-        a for a in window.findChild(QToolBar).actions() if a.text() == "保存"
+        a for a in window._toolbar.actions() if a.text() == "保存"
     )
     assert save_act.shortcutContext() == Qt.ShortcutContext.WindowShortcut
     assert save_act not in window.canvas.actions()
@@ -98,3 +122,297 @@ def test_preview_cleared_on_navigation(window):
     assert window._index == 1
     assert not window._preview_act.isChecked()
     assert not window.canvas._preview
+
+
+def test_detect_action_shortcut_is_d(window):
+    assert window._detect_act.shortcut() == QKeySequence(Qt.Key.Key_D)
+
+
+def test_detected_regions_are_added_to_canvas(window):
+    window._on_detected([{"bbox": [0, 0, 10, 10]}, {"bbox": [20, 0, 30, 10]}])
+    assert len(window.canvas.get_regions()) == 2
+
+
+def test_detected_regions_can_be_undone_at_once(window):
+    window._on_detected([{"bbox": [0, 0, 10, 10]}, {"bbox": [20, 0, 30, 10]}])
+    window.canvas.undo()
+    assert window.canvas.get_regions() == []
+
+
+def test_empty_detection_shows_message(window):
+    window._on_detected([])
+    assert "追加する範囲はありませんでした" in window.statusBar().currentMessage()
+
+
+def test_detecting_twice_does_not_duplicate_the_same_region(window):
+    detections = [{"bbox": [0, 0, 10, 10]}, {"bbox": [20, 0, 30, 10]}]
+    window._on_detected(detections)
+    window._on_detected(detections)
+    assert len(window.canvas.get_regions()) == 2
+    assert "追加する範囲はありませんでした" in window.statusBar().currentMessage()
+
+
+def test_detect_failure_shows_error(window, monkeypatch):
+    shown = []
+    monkeypatch.setattr(
+        "mosaic_tool.app.QMessageBox.critical",
+        lambda *args, **kwargs: shown.append(args[2]),
+    )
+    window._on_detect_failed("モデルの読み込みに失敗しました")
+    assert shown and "モデルの読み込み" in shown[0]
+
+
+def test_toolbar_has_no_confidence_spinbox(window):
+    # 信頼度はモデルごとの設定に一本化した
+    assert not hasattr(window, "_confidence_spin")
+
+
+def test_detect_action_opens_the_window(window):
+    window._detect_act.trigger()
+    assert window._detect_window is not None
+    assert window._detect_window.isVisible() is True
+    window._detect_window.close()
+
+
+def test_detect_window_is_reused(window):
+    window._detect_act.trigger()
+    first = window._detect_window
+    window._detect_act.trigger()  # 一度閉じる
+    window._detect_act.trigger()  # 開き直しても同じインスタンス
+    assert window._detect_window is first
+    first.close()
+
+
+def test_detect_action_toggles_the_window(window):
+    window._detect_act.trigger()
+    assert window._detect_act.isChecked() is True
+    assert window._detect_window.isVisible() is True
+    window._detect_act.trigger()
+    assert window._detect_act.isChecked() is False
+    assert window._detect_window.isVisible() is False
+
+
+def test_closing_the_detect_window_unchecks_the_action(window):
+    window._detect_act.trigger()
+    window._detect_window.close()
+    assert window._detect_act.isChecked() is False
+
+
+def test_detect_window_learns_whether_an_image_is_open(window):
+    window._detect_act.trigger()
+    # フィクスチャは画像 2 枚を開いた状態
+    assert window._detect_window._image_available is True
+    window._detect_window.close()
+
+
+def test_start_detect_sends_the_models_to_the_worker(window, monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        window._worker,
+        "request",
+        lambda image, models, device: sent.append((image, models, device)),
+    )
+    window._detect_act.trigger()
+    window._start_detect({"a.pt": {"conf": 0.25, "classes": ["face"]}})
+    assert sent and sent[0][1] == {"a.pt": {"conf": 0.25, "classes": ["face"]}}
+    window._detect_window.close()
+
+
+def test_class_request_is_forwarded_to_the_worker(window, monkeypatch):
+    """ウィンドウのクラス要求がワーカーへ渡り、応答がウィンドウへ返る"""
+    calls = []
+    monkeypatch.setattr(
+        window._worker, "request_classes", lambda: calls.append("requested")
+    )
+    window._detect_act.trigger()
+    detect_window = window._detect_window
+    detect_window.classes_requested.emit()
+    assert calls == ["requested"]
+
+    received = []
+    monkeypatch.setattr(detect_window, "show_class_selection", received.append)
+    window._worker.classes_received.emit({"m.pt": ["face"]})
+    assert received == [{"m.pt": ["face"]}]
+    detect_window.close()
+
+
+def test_detect_failure_cancels_a_pending_class_request(window, monkeypatch):
+    monkeypatch.setattr(
+        "mosaic_tool.app.QMessageBox.critical", lambda *args, **kwargs: None
+    )
+    window._detect_act.trigger()
+    detect_window = window._detect_window
+    cancelled = []
+    monkeypatch.setattr(
+        detect_window, "cancel_class_request", lambda: cancelled.append(1)
+    )
+    window._on_detect_failed("失敗")
+    assert cancelled == [1]
+    detect_window.close()
+
+
+@pytest.fixture
+def batch(window, monkeypatch):
+    """全ファイル実行を確認ダイアログなしで走らせ、依頼先の画像を記録する"""
+    monkeypatch.setattr(
+        "mosaic_tool.app.QMessageBox.question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
+    )
+    requested = []
+    monkeypatch.setattr(
+        window._worker,
+        "request",
+        lambda image, models, device: requested.append(image),
+    )
+    return requested
+
+
+def test_detect_all_asks_before_running(window, monkeypatch):
+    asked = []
+
+    def fake_question(*args, **kwargs):
+        asked.append(args[2])
+        return QMessageBox.StandardButton.No
+
+    monkeypatch.setattr("mosaic_tool.app.QMessageBox.question", fake_question)
+    monkeypatch.setattr(window._worker, "request", lambda *a: pytest.fail("実行された"))
+    window._start_detect_all({"a.pt": 0.25})
+    # 断ったら何も実行しない
+    assert asked and "2 件" in asked[0]
+    assert window._batch_models is None
+
+
+def test_detect_all_walks_every_image_and_saves(window, batch, tmp_path):
+    window._start_detect_all({"a.pt": 0.25})
+    assert batch == [str(tmp_path / "img0.png")]
+    window._on_detected([{"bbox": [0, 0, 10, 10]}])
+    # 1 枚目を保存して次の画像へ進む
+    assert (tmp_path / "img0_mc.png").exists()
+    assert window._index == 1
+    assert batch[-1] == str(tmp_path / "img1.png")
+    window._on_detected([{"bbox": [0, 0, 10, 10]}])
+    assert (tmp_path / "img1_mc.png").exists()
+    # 最後まで終わったら通常の状態へ戻る
+    assert window._batch_models is None
+    assert "2 件の画像を保存しました" in window.statusBar().currentMessage()
+
+
+def test_detect_all_keeps_the_window_running_until_it_ends(window, batch):
+    window._detect_act.trigger()
+    window._start_detect_all({"a.pt": 0.25})
+    window._on_detected([])
+    assert window._detect_window._running is True
+    window._on_detected([])
+    assert window._detect_window._running is False
+    window._detect_window.close()
+
+
+def test_detect_all_shows_progress_by_processed_files(window, batch):
+    """全ファイル実行の進捗は処理済みファイル数 / 全ファイル数で出す"""
+    window._detect_act.trigger()
+    bar = window._detect_window._bar
+    window._start_detect_all({"a.pt": 0.25})
+    assert (bar.value(), bar.maximum()) == (0, 2)
+    # モデル単位の進捗では上書きしない
+    window._on_detect_progress(1, 3, "a.pt")
+    assert (bar.value(), bar.maximum()) == (0, 2)
+    window._on_detected([])
+    assert (bar.value(), bar.maximum()) == (1, 2)
+    window._detect_window.close()
+
+
+def test_detect_all_stops_on_failure(window, batch, monkeypatch):
+    monkeypatch.setattr(
+        "mosaic_tool.app.QMessageBox.critical", lambda *args, **kwargs: None
+    )
+    window._start_detect_all({"a.pt": 0.25})
+    window._on_detect_failed("検出に失敗しました")
+    assert window._batch_models is None
+    # 中断後は次の画像を要求しない
+    assert len(batch) == 1
+
+
+def test_navigation_is_blocked_during_detect_all(window, batch):
+    window._start_detect_all({"a.pt": 0.25})
+    window._go(1)
+    assert window._index == 0
+
+
+def test_opening_files_is_blocked_during_detect_all(window, batch, tmp_path):
+    # 応答待ちの間に対象が差し替わると別の画像へ結果を書き込んでしまう
+    other = tmp_path / "other.png"
+    Image.new("RGB", (10, 10)).save(other)
+    window._start_detect_all({"a.pt": 0.25})
+    window.open_paths([other])
+    assert len(window._images) == 2
+
+
+def test_manual_save_is_blocked_during_detect_all(window, batch, tmp_path):
+    window._start_detect_all({"a.pt": 0.25})
+    window._save_current()
+    assert not (tmp_path / "img0_mc.png").exists()
+
+
+def test_detect_failure_restores_the_window(window, monkeypatch):
+    monkeypatch.setattr(
+        "mosaic_tool.app.QMessageBox.critical", lambda *args, **kwargs: None
+    )
+    window._detect_act.trigger()
+    window._detect_window.set_running(True)
+    window._on_detect_failed("検出に失敗しました")
+    assert window._detect_window._running is False
+    window._detect_window.close()
+
+
+def test_closing_the_main_window_closes_the_detect_window(window):
+    window._detect_act.trigger()
+    detect_window = window._detect_window
+    window.close()
+    assert detect_window.isVisible() is False
+
+
+def test_detect_action_opens_setup_first_when_runtime_is_missing(window, monkeypatch):
+    # 未構築なら検出ウィンドウより先にセットアップを出す
+    monkeypatch.setattr("mosaic_tool.app.detect_paths.is_runtime_ready", lambda: False)
+    opened = []
+
+    class FakeSetupDialog:
+        def __init__(self, parent=None):
+            opened.append(True)
+
+        def exec(self):
+            return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr("mosaic_tool.app.RuntimeSetupDialog", FakeSetupDialog)
+    window._detect_act.trigger()
+    assert opened
+    # セットアップを断ったら検出ウィンドウは出さない(構築前は何もできない)
+    assert window._detect_window is None
+    assert window._detect_act.isChecked() is False
+
+
+def test_detect_window_opens_after_a_successful_setup(window, monkeypatch):
+    monkeypatch.setattr("mosaic_tool.app.detect_paths.is_runtime_ready", lambda: False)
+
+    class FakeSetupDialog:
+        def __init__(self, parent=None):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr("mosaic_tool.app.RuntimeSetupDialog", FakeSetupDialog)
+    window._detect_act.trigger()
+    assert window._detect_window is not None
+    window._detect_window.close()
+
+
+def test_setup_is_not_shown_when_the_runtime_is_ready(window, monkeypatch):
+    monkeypatch.setattr("mosaic_tool.app.detect_paths.is_runtime_ready", lambda: True)
+    opened = []
+    monkeypatch.setattr(
+        "mosaic_tool.app.RuntimeSetupDialog", lambda parent=None: opened.append(True)
+    )
+    window._detect_act.trigger()
+    assert opened == []
+    window._detect_window.close()

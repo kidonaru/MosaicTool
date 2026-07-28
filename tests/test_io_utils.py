@@ -40,6 +40,37 @@ def test_load_save_roundtrip_png(tmp_path):
     assert Image.open(dest).mode == "RGBA"
 
 
+def test_save_keeps_meta_by_default(tmp_path):
+    img = Image.new("RGB", (10, 10))
+    img.info["icc_profile"] = b"fake-icc"
+    dest = tmp_path / "keep.png"
+    io_utils.save_image(img, dest)
+    assert Image.open(dest).info.get("icc_profile") == b"fake-icc"
+
+
+def test_save_strips_meta(tmp_path):
+    # keep_meta=False なら info 経由で引き継がれるメタ情報も残さない
+    img = Image.new("RGB", (10, 10))
+    img.info["icc_profile"] = b"fake-icc"
+    img.info["Comment"] = "secret"
+    dest = tmp_path / "strip.png"
+    io_utils.save_image(img, dest, keep_meta=False)
+    saved = Image.open(dest).info
+    assert "icc_profile" not in saved
+    assert "Comment" not in saved
+    # 元画像の info は壊さない
+    assert img.info["icc_profile"] == b"fake-icc"
+
+
+def test_save_strips_meta_keeps_transparency(tmp_path):
+    # 透過は見た目に影響するためメタ削除でも残す
+    img = Image.new("P", (10, 10))
+    img.info["transparency"] = 0
+    dest = tmp_path / "trans.png"
+    io_utils.save_image(img, dest, keep_meta=False)
+    assert Image.open(dest).info.get("transparency") == 0
+
+
 def test_save_jpg_converts_rgba(tmp_path):
     # JPEG はアルファ非対応のため RGB に変換して保存する
     img = Image.new("RGBA", (10, 10), (255, 0, 0, 128))

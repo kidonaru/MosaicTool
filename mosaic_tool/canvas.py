@@ -605,6 +605,20 @@ class MosaicCanvas(QGraphicsView):
         self._refresh_overlay()
         return item
 
+    def add_regions(self, regions: list[Region]) -> list[RegionItem]:
+        """複数の範囲をまとめて追加する(自動検出用)
+
+        Undo スタックには 1 エントリだけ積み、Ctrl+Z 一回で追加分をまとめて
+        取り消せるようにする。追加分は非選択のまま置く(選択したままだと
+        次の操作で自動検出の結果を丸ごと動かしてしまう)。
+        """
+        if not regions:
+            return []
+        self._scene.clearSelection()
+        items = [self.add_region(region, push_undo=False) for region in regions]
+        self._undo_stack.append(("add_many", items))
+        return items
+
     def image_paths(self) -> list[QPainterPath]:
         """全範囲の画像座標パス(保存時のマスク生成に使う)"""
         return [item.image_path() for item in self._region_items()]
@@ -623,6 +637,9 @@ class MosaicCanvas(QGraphicsView):
         entry = self._undo_stack.pop()
         if entry[0] == "add":
             self._scene.removeItem(entry[1])
+        elif entry[0] == "add_many":
+            for item in entry[1]:
+                self._scene.removeItem(item)
         elif entry[0] == "remove":
             for item in entry[1]:
                 self._scene.addItem(item)
@@ -721,13 +738,14 @@ class MosaicCanvas(QGraphicsView):
         ):
             super().mousePressEvent(event)
             return
-        # 矩形モード: ドラッグで矩形範囲を作成
-        if (
+        # 画像の外を押したときは範囲を作らない(選択解除だけを通す)
+        can_create = (
             event.button() == Qt.MouseButton.LeftButton
-            and self._mode is ToolMode.RECT
-            and self._pixmap_item is not None
             and not self._preview
-        ):
+            and self._is_on_image(event.position().toPoint())
+        )
+        # 矩形モード: ドラッグで矩形範囲を作成
+        if can_create and self._mode is ToolMode.RECT:
             self._scene.clearSelection()
             self._rect_start = self.mapToScene(event.position().toPoint())
             pen = QPen(QColor(255, 60, 60), 0, Qt.PenStyle.DashLine)
@@ -737,12 +755,7 @@ class MosaicCanvas(QGraphicsView):
             event.accept()
             return
         # ペンモード: ドラッグの軌跡で範囲を作成
-        if (
-            event.button() == Qt.MouseButton.LeftButton
-            and self._mode is ToolMode.PEN
-            and self._pixmap_item is not None
-            and not self._preview
-        ):
+        if can_create and self._mode is ToolMode.PEN:
             self._scene.clearSelection()
             start = self.mapToScene(event.position().toPoint())
             self._pen_points = [start]
@@ -763,6 +776,12 @@ class MosaicCanvas(QGraphicsView):
     def _region_item_at(self, view_pos) -> bool:
         """ビュー座標に範囲アイテムがあるか"""
         return any(isinstance(it, RegionItem) for it in self.items(view_pos))
+
+    def _is_on_image(self, view_pos) -> bool:
+        """ビュー座標が画像の内側か(画像未読み込みなら常に False)"""
+        if self._pixmap_item is None:
+            return False
+        return self._pixmap_item.sceneBoundingRect().contains(self.mapToScene(view_pos))
 
     def mouseMoveEvent(self, event):
         if self._panning:

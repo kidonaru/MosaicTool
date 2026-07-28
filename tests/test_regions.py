@@ -1,6 +1,10 @@
 from PySide6.QtCore import QPointF, QRectF
 
-from mosaic_tool.regions import Region, RegionKind
+from mosaic_tool.regions import Region, RegionKind, drop_duplicate_regions
+
+
+def _rect(x, y, w=100, h=50) -> Region:
+    return Region(kind=RegionKind.RECT, rect=QRectF(x, y, w, h))
 
 
 def test_rect_local_path_bounds():
@@ -48,3 +52,63 @@ def test_stroke_path_covers_line():
     br = r.local_path().boundingRect()
     assert abs(br.height() - 20) < 1.0
     assert abs(br.width() - 120) < 1.0
+
+
+def test_polygon_local_path_bounds():
+    # 三角形の外接矩形は (0,0,100,50)
+    r = Region(
+        kind=RegionKind.POLYGON,
+        points=[QPointF(0, 0), QPointF(100, 0), QPointF(100, 50)],
+    )
+    assert r.local_path().boundingRect() == QRectF(0, 0, 100, 50)
+
+
+def test_polygon_is_closed_shape():
+    # 始点と終点をつないだ閉じた図形になり、内部の点を含む
+    r = Region(
+        kind=RegionKind.POLYGON,
+        points=[QPointF(0, 0), QPointF(100, 0), QPointF(100, 50)],
+    )
+    assert r.local_path().contains(QPointF(80, 20))
+    assert not r.local_path().contains(QPointF(20, 40))
+
+
+def test_duplicate_of_an_existing_region_is_dropped():
+    assert drop_duplicate_regions([_rect(0, 0)], [_rect(0, 0)]) == []
+
+
+def test_slightly_shifted_region_is_treated_as_the_same():
+    # 数 px のずれは同じ対象の検出とみなす
+    assert drop_duplicate_regions([_rect(2, 1)], [_rect(0, 0)]) == []
+
+
+def test_different_region_is_kept():
+    kept = drop_duplicate_regions([_rect(200, 200)], [_rect(0, 0)])
+    assert len(kept) == 1
+
+
+def test_duplicates_within_the_new_regions_are_reduced_to_one():
+    # 複数のモデルが同じ対象を捉えた場合も 1 つだけ残す
+    kept = drop_duplicate_regions([_rect(0, 0), _rect(1, 0), _rect(200, 200)], [])
+    assert len(kept) == 2
+
+
+def test_moved_existing_region_is_compared_at_its_current_position():
+    # 既存範囲は変形後の位置で比べる
+    moved = Region(kind=RegionKind.RECT, rect=QRectF(0, 0, 100, 50), pos=QPointF(200, 200))
+    assert drop_duplicate_regions([_rect(200, 200)], [moved]) == []
+    assert len(drop_duplicate_regions([_rect(0, 0)], [moved])) == 1
+
+
+def test_polygon_rotation_90_around_center():
+    # 矩形と同じく中心回りに回転する(幅と高さが入れ替わり中心は不変)
+    r = Region(
+        kind=RegionKind.POLYGON,
+        points=[QPointF(0, 0), QPointF(100, 0), QPointF(100, 50), QPointF(0, 50)],
+        rotation=90,
+    )
+    br = r.image_path().boundingRect()
+    assert abs(br.width() - 50) < 1e-6
+    assert abs(br.height() - 100) < 1e-6
+    assert abs(br.center().x() - 50) < 1e-6
+    assert abs(br.center().y() - 25) < 1e-6

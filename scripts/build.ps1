@@ -6,6 +6,7 @@
 [CmdletBinding()]
 param(
     [string]$Python,
+    [string]$UvVersion = "latest",
     [switch]$OneDir,
     [switch]$Clean
 )
@@ -56,6 +57,33 @@ Invoke-Python @("-m", "pip", "install", "--upgrade", "pip")
 Invoke-Python @("-m", "pip", "install", "-r", "requirements.txt")
 Invoke-Python @("-m", "pip", "install", "pyinstaller")
 
+# 自動検出のセットアップに使う uv を取得して同梱する
+# (ユーザーの環境に Python が無くても venv を用意できるようにするため)
+$uvDir = Join-Path $repoRoot "build\uv"
+$uvExe = Join-Path $uvDir "uv.exe"
+if (-not (Test-Path -LiteralPath $uvExe)) {
+    Write-Host "-- uv ($UvVersion) を取得します"
+    New-Item -ItemType Directory -Path $uvDir -Force | Out-Null
+    $uvAsset = "uv-x86_64-pc-windows-msvc.zip"
+    $uvUrl = if ($UvVersion -eq "latest") {
+        "https://github.com/astral-sh/uv/releases/latest/download/$uvAsset"
+    } else {
+        "https://github.com/astral-sh/uv/releases/download/$UvVersion/$uvAsset"
+    }
+    $uvZip = Join-Path $uvDir $uvAsset
+    Invoke-WebRequest -Uri $uvUrl -OutFile $uvZip
+    Expand-Archive -LiteralPath $uvZip -DestinationPath $uvDir -Force
+    Remove-Item -LiteralPath $uvZip -Force
+}
+if (-not (Test-Path -LiteralPath $uvExe)) {
+    throw "uv.exe を取得できませんでした: $uvDir"
+}
+
+$workerScript = Join-Path $repoRoot "mosaic_tool\detect\worker_main.py"
+if (-not (Test-Path -LiteralPath $workerScript)) {
+    throw "検出ワーカーが見つかりません: $workerScript"
+}
+
 # ビルド本体
 $mode = if ($OneDir) { "--onedir" } else { "--onefile" }
 $iconPath = Join-Path $repoRoot "assets\icon.ico"
@@ -72,6 +100,10 @@ $options = @(
     "--specpath", "build",     # .spec をリポジトリ直下に置かない
     "--icon", $iconPath,
     "--add-data", "${iconPath}:assets",   # mosaic_tool/resources.py が assets/icon.ico を参照する
+    "--add-data", "${uvExe}:.",           # mosaic_tool/detect/paths.py が展開先ルートの uv.exe を参照する
+    # ワーカーは venv の Python へスクリプトのパスとして渡すため、
+    # PYZ に取り込まれるだけでは足りず .py の実体も同梱する
+    "--add-data", "${workerScript}:mosaic_tool/detect",
     "--paths", ".",            # mosaic_tool パッケージをリポジトリ直下から解決する
     "mosaic_tool/__main__.py"
 )

@@ -2,14 +2,15 @@
 import os
 
 import pytest
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt
+from PySide6.QtGui import QMouseEvent
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from PIL import Image  # noqa: E402
 
-from mosaic_tool.canvas import MosaicCanvas, RegionItem  # noqa: E402
+from mosaic_tool.canvas import MosaicCanvas, RegionItem, ToolMode  # noqa: E402
 from mosaic_tool.mosaic import paths_to_mask, snap_mask_to_grid  # noqa: E402
 from mosaic_tool.regions import Region, RegionKind  # noqa: E402
 
@@ -89,3 +90,97 @@ def test_overlay_clip_is_snapped_to_cells(qapp):
     mask = snap_mask_to_grid(paths_to_mask(canvas.image_paths(), (100, 100)), 10, 0.5)
     for x in (5, 25, 29, 31, 95):
         assert clip.contains(QPointF(x, 50)) == (mask.getpixel((x, 50)) == 255)
+
+
+def _canvas_with_image(qapp) -> MosaicCanvas:
+    canvas = MosaicCanvas()
+    canvas.set_image(Image.new("RGB", (200, 200), (0, 0, 0)))
+    return canvas
+
+
+def _rect_region(x: float) -> Region:
+    return Region(kind=RegionKind.RECT, rect=QRectF(x, 0, 10, 10))
+
+
+def test_add_regions_adds_all(qapp):
+    canvas = _canvas_with_image(qapp)
+    canvas.add_regions([_rect_region(0), _rect_region(20)])
+    assert len(canvas.get_regions()) == 2
+
+
+def test_add_regions_undo_removes_all_at_once(qapp):
+    canvas = _canvas_with_image(qapp)
+    canvas.add_regions([_rect_region(0), _rect_region(20)])
+    canvas.undo()
+    assert canvas.get_regions() == []
+
+
+def test_add_regions_keeps_existing_regions(qapp):
+    canvas = _canvas_with_image(qapp)
+    canvas.add_region(_rect_region(100))
+    canvas.add_regions([_rect_region(0), _rect_region(20)])
+    canvas.undo()
+    # 手で引いた範囲は残る
+    assert len(canvas.get_regions()) == 1
+
+
+def test_add_regions_leaves_items_unselected(qapp):
+    # 自動検出の追加分は非選択。意図せず全体を動かしてしまう事故を防ぐ
+    canvas = _canvas_with_image(qapp)
+    old = canvas.add_region(_rect_region(100))
+    old.setSelected(True)
+    items = canvas.add_regions([_rect_region(0), _rect_region(20)])
+    assert items and all(not item.isSelected() for item in items)
+    assert not old.isSelected()
+
+
+def test_add_region_keeps_selection_for_manual_drawing(qapp):
+    # 手描き直後の選択はそのまま(描いてすぐ変形できるようにする)
+    canvas = _canvas_with_image(qapp)
+    item = canvas.add_region(_rect_region(0))
+    item.setSelected(True)
+    assert item.isSelected()
+
+
+def test_add_regions_with_empty_list_pushes_no_undo(qapp):
+    canvas = _canvas_with_image(qapp)
+    canvas.add_region(_rect_region(100))
+    canvas.add_regions([])
+    canvas.undo()
+    # 空追加は Undo を消費しないため、直前の追加が取り消される
+    assert canvas.get_regions() == []
+
+
+def _press(canvas: MosaicCanvas, scene_pt: QPointF) -> None:
+    """シーン座標を指定して左ボタンの押下を送る"""
+    pos = QPointF(canvas.mapFromScene(scene_pt))
+    canvas.mousePressEvent(
+        QMouseEvent(
+            QEvent.Type.MouseButtonPress,
+            pos,
+            pos,
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+    )
+
+
+CREATION_MODES = [(ToolMode.RECT, "_rect_start"), (ToolMode.PEN, "_pen_points")]
+
+
+@pytest.mark.parametrize("mode, attr", CREATION_MODES)
+def test_press_inside_image_starts_creation(qapp, mode, attr):
+    canvas = _canvas_with_image(qapp)
+    canvas.set_mode(mode)
+    _press(canvas, QPointF(100, 100))
+    assert getattr(canvas, attr)
+
+
+@pytest.mark.parametrize("mode, attr", CREATION_MODES)
+def test_press_outside_image_does_not_start_creation(qapp, mode, attr):
+    # 画像の外側(余白)を押しても範囲は作らない
+    canvas = _canvas_with_image(qapp)
+    canvas.set_mode(mode)
+    _press(canvas, QPointF(-30, -30))
+    assert not getattr(canvas, attr)
