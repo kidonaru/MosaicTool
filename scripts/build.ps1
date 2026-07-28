@@ -90,10 +90,10 @@ $iconPath = Join-Path $repoRoot "assets\icon.ico"
 if (-not (Test-Path -LiteralPath $iconPath)) {
     throw "アプリアイコンが見つかりません: $iconPath"
 }
-$options = @(
-    "-m", "PyInstaller",
-    "--noconfirm",
-    "--clean",
+# .spec は一度生成してから編集する(Qt の OpenSSL バックエンドを外すため)。
+# ビルド用の --noconfirm / --clean は makespec が受け付けないので分けて渡す
+$specOptions = @(
+    "-m", "PyInstaller.utils.cliutils.makespec",
     $mode,
     "--windowed",              # コンソールウィンドウを出さない
     "--name", $appName,
@@ -107,7 +107,16 @@ $options = @(
     "--paths", ".",            # mosaic_tool パッケージをリポジトリ直下から解決する
     "mosaic_tool/__main__.py"
 )
-Invoke-Python $options
+Invoke-Python $specOptions
+
+$specPath = Join-Path $repoRoot "build\$appName.spec"
+if (-not (Test-Path -LiteralPath $specPath)) {
+    throw "spec が生成されませんでした: $specPath"
+}
+Write-Host "-- Qt の OpenSSL バックエンドを除外します"
+Invoke-Python @((Join-Path $PSScriptRoot "exclude_openssl_backend.py"), $specPath)
+
+Invoke-Python @("-m", "PyInstaller", "--noconfirm", "--clean", $specPath)
 
 $output = if ($OneDir) { "dist\$appName\$appName.exe" } else { "dist\$appName.exe" }
 if (-not (Test-Path $output)) {

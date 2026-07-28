@@ -64,6 +64,31 @@ def test_entries_nested_deeper_are_found():
     assert checker.openssl_sources(toc) == {"-3.dll": {"libssl": Path(r"C:\x\libssl-3.dll")}}
 
 
+def test_qt_openssl_backend_is_detected():
+    toc = _toc([
+        (r"PySide6\plugins\tls\qopensslbackend.dll", r"C:\py\PySide6\...", "BINARY"),
+        (r"PySide6\plugins\tls\qschannelbackend.dll", r"C:\py\PySide6\...", "BINARY"),
+    ])
+    assert checker.qt_openssl_backends(toc) == [r"PySide6\plugins\tls\qopensslbackend.dll"]
+
+
+def test_no_qt_openssl_backend_is_accepted():
+    toc = _toc([
+        (r"PySide6\plugins\tls\qschannelbackend.dll", r"C:\py\PySide6\...", "BINARY"),
+    ])
+    assert checker.qt_openssl_backends(toc) == []
+
+
+def test_main_fails_when_qt_openssl_backend_is_bundled(tmp_path, capsys):
+    toc_file = tmp_path / "EXE-00.toc"
+    toc_file.write_text(
+        _toc([(r"PySide6\plugins\tls\qopensslbackend.dll", r"C:\py", "BINARY")]),
+        encoding="utf-8",
+    )
+    assert checker.main(["check", str(toc_file)]) == 1
+    assert "qopensslbackend" in capsys.readouterr().err
+
+
 def test_main_fails_on_mismatch(tmp_path, capsys):
     toc_file = tmp_path / "EXE-00.toc"
     toc_file.write_text(_toc([
