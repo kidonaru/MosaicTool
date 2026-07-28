@@ -19,9 +19,9 @@ version:
 run *ARGS:
     python -m mosaic_tool {{ARGS}}
 
-# exe をローカルでビルドする (例: just build -Clean)
+# 実行ファイルをローカルでビルドする (例: just build --clean)
 build *ARGS:
-    {{_ps}} scripts/build.ps1 {{ARGS}}
+    python scripts/build.py {{ARGS}}
 
 # 配布用 zip をローカルで作成する (例: just package -Clean)
 package *ARGS:
