@@ -27,8 +27,8 @@ class FakeDownloader(QObject):
         super().__init__(parent)
         self.calls = []
 
-    def start(self, url, destination):
-        self.calls.append((url, destination))
+    def start(self, url, destination, sha256=""):
+        self.calls.append((url, destination, sha256))
 
     def cancel(self):
         pass
@@ -44,7 +44,10 @@ def test_cpu_is_selected_by_default(qapp, monkeypatch):
 
 def test_model_download_starts_after_the_runtime_is_built(qapp, monkeypatch, tmp_path):
     monkeypatch.setattr(paths, "base_dir", lambda: tmp_path)
-    pending = [CatalogModel("a.pt", "顔", 1.0, 25), CatalogModel("b.pt", "目", 1.0, 40)]
+    pending = [
+        CatalogModel("a.pt", "顔", 1.0, 25, "aa"),
+        CatalogModel("b.pt", "目", 1.0, 40, "bb"),
+    ]
     monkeypatch.setattr(downloader, "pending_models", lambda: pending)
     fake = FakeDownloader()
     monkeypatch.setattr(setup_dialog, "ModelDownloader", lambda parent=None: fake)
@@ -55,7 +58,10 @@ def test_model_download_starts_after_the_runtime_is_built(qapp, monkeypatch, tmp
 
 def test_all_models_are_downloaded_in_order(qapp, monkeypatch, tmp_path):
     monkeypatch.setattr(paths, "base_dir", lambda: tmp_path)
-    pending = [CatalogModel("a.pt", "顔", 1.0, 25), CatalogModel("b.pt", "目", 1.0, 40)]
+    pending = [
+        CatalogModel("a.pt", "顔", 1.0, 25, "aa"),
+        CatalogModel("b.pt", "目", 1.0, 40, "bb"),
+    ]
     monkeypatch.setattr(downloader, "pending_models", lambda: pending)
     fake = FakeDownloader()
     monkeypatch.setattr(setup_dialog, "ModelDownloader", lambda parent=None: fake)
@@ -71,7 +77,7 @@ def test_download_failure_still_completes_the_setup(qapp, monkeypatch, tmp_path)
     # venv さえあれば手動でモデルを置いて使えるため、ここで失敗にしない
     monkeypatch.setattr(paths, "base_dir", lambda: tmp_path)
     monkeypatch.setattr(
-        downloader, "pending_models", lambda: [CatalogModel("a.pt", "顔", 1.0, 25)]
+        downloader, "pending_models", lambda: [CatalogModel("a.pt", "顔", 1.0, 25, "aa")]
     )
     monkeypatch.setattr(
         setup_dialog, "ModelDownloader", lambda parent=None: FakeDownloader()
@@ -86,7 +92,7 @@ def test_download_failure_still_completes_the_setup(qapp, monkeypatch, tmp_path)
 def test_runtime_failure_does_not_start_downloads(qapp, monkeypatch, tmp_path):
     monkeypatch.setattr(paths, "base_dir", lambda: tmp_path)
     monkeypatch.setattr(
-        downloader, "pending_models", lambda: [CatalogModel("a.pt", "顔", 1.0, 25)]
+        downloader, "pending_models", lambda: [CatalogModel("a.pt", "顔", 1.0, 25, "aa")]
     )
     fake = FakeDownloader()
     monkeypatch.setattr(setup_dialog, "ModelDownloader", lambda parent=None: fake)

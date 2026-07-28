@@ -17,6 +17,11 @@ WORKER_SCRIPT_NAME = "detect_worker.py"
 UV_EXE_NAME = "uv.exe"
 
 
+def _repo_root() -> Path:
+    """ソース実行時のリポジトリ直下(このファイルは mosaic_tool/detect/ にある)"""
+    return Path(__file__).resolve().parents[2]
+
+
 def base_dir() -> Path:
     """models/ runtime/ を置く基準ディレクトリ
 
@@ -24,7 +29,7 @@ def base_dir() -> Path:
     """
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parents[2]
+    return _repo_root()
 
 
 def _bundle_dir() -> Path:
@@ -37,7 +42,7 @@ def _bundle_dir() -> Path:
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
         return Path(meipass)
-    return Path(__file__).resolve().parents[2]
+    return _repo_root()
 
 
 def models_dir() -> Path:

@@ -1,6 +1,7 @@
 """標準モデルのダウンロード(QtNetwork を使い、本体に依存を増やさない)"""
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
@@ -12,6 +13,7 @@ from mosaic_tool.detect.catalog import MODELS, CatalogModel
 PART_SUFFIX = ".part"
 MAX_ATTEMPTS = 3       # 初回を含む試行回数
 RETRY_DELAY_MS = 2000  # 再試行までの待ち時間(回線の一時的な不調を跨ぐため)
+HASH_CHUNK_SIZE = 1 << 20
 CANCELLED_TEXT = "ダウンロードを中止しました"
 
 
@@ -28,6 +30,15 @@ def part_path(destination: Path) -> Path:
     読み込みに失敗するのを防ぐ。
     """
     return destination.with_name(destination.name + PART_SUFFIX)
+
+
+def file_sha256(path: Path) -> str:
+    """ファイルの SHA-256(数 MB あるので分割して読む)"""
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        while chunk := f.read(HASH_CHUNK_SIZE):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class ModelDownloader(QObject):
@@ -47,14 +58,19 @@ class ModelDownloader(QObject):
         self._file = None
         self._url = ""
         self._destination: Path | None = None
+        self._sha256 = ""
         self._attempt = 0
         self._cancelled = False
 
-    def start(self, url: str, destination: Path) -> None:
-        """url を destination へ保存する(結果は finished で返る)"""
+    def start(self, url: str, destination: Path, sha256: str = "") -> None:
+        """url を destination へ保存する(結果は finished で返る)
+
+        sha256 を渡すと、保存前に内容が一致することを確かめる。
+        """
         self._cancelled = False
         self._url = url
         self._destination = destination
+        self._sha256 = sha256
         self._attempt = 0
         self._request()
 
@@ -128,6 +144,31 @@ class ModelDownloader(QObject):
             return
         self._request()
 
+    def _verify(self, part: Path, name: str) -> bool:
+        """受信した内容がカタログのハッシュと一致するか確かめる
+
+        壊れた受信なら再試行で直るため、通信エラーと同じ扱いにする。
+        繰り返し合わない場合は配布元が差し替わった可能性があり、
+        pickle を含む .pt をそのまま読み込ませないよう失敗にする。
+        """
+        if not self._sha256:
+            return True
+        try:
+            actual = file_sha256(part)
+        except OSError as e:
+            self._discard()
+            self._emit_finished(False, f"ファイルを確認できません: {part}\n{e}")
+            return False
+        if actual == self._sha256:
+            return True
+        message = f"ファイルの検証に失敗しました: {name}"
+        if self._attempt < MAX_ATTEMPTS:
+            self._schedule_retry(message)
+            return False
+        self._discard()
+        self._emit_finished(False, message)
+        return False
+
     def _on_finished(self) -> None:
         reply, self._reply = self._reply, None
         if reply is None:
@@ -148,8 +189,11 @@ class ModelDownloader(QObject):
             return
         self._close_file()
         destination = self._destination
+        part = part_path(destination)
+        if not self._verify(part, destination.name):
+            return
         try:
-            part_path(destination).replace(destination)
+            part.replace(destination)
         except OSError as e:
             self._discard()
             self._emit_finished(False, f"保存に失敗しました: {destination}\n{e}")

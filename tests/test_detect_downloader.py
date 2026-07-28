@@ -1,4 +1,5 @@
-"""ダウンロード対象の判定と一時ファイル名の検証(通信は行わない)"""
+"""ダウンロード対象の判定・一時ファイル名・ハッシュ検証の確認(通信は行わない)"""
+import hashlib
 import os
 from pathlib import Path
 
@@ -67,6 +68,51 @@ def test_cancel_while_waiting_for_retry_reports_the_abort(qapp, stub_downloader)
     qapp.processEvents()
     assert results == [(False, downloader.CANCELLED_TEXT)]
     assert len(stub_downloader.requests) == 1  # 再試行は動かない
+
+
+def test_file_sha256_matches_hashlib(tmp_path):
+    target = tmp_path / "a.bin"
+    body = b"abc" * 100_000  # 分割読み込みを跨ぐ大きさ
+    target.write_bytes(body)
+    assert downloader.file_sha256(target) == hashlib.sha256(body).hexdigest()
+
+
+def test_verify_passes_when_the_hash_matches(qapp, tmp_path):
+    part = tmp_path / "a.pt.part"
+    part.write_bytes(b"body")
+    dl = downloader.ModelDownloader()
+    dl._sha256 = hashlib.sha256(b"body").hexdigest()
+    assert dl._verify(part, "a.pt") is True
+    assert part.is_file()  # 保存前なので消さない
+
+
+def test_verify_retries_when_the_hash_differs(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr(downloader, "RETRY_DELAY_MS", 0)
+    part = tmp_path / "a.pt.part"
+    part.write_bytes(b"tampered")
+    dl = downloader.ModelDownloader()
+    dl._destination = tmp_path / "a.pt"
+    dl._sha256 = hashlib.sha256(b"body").hexdigest()
+    dl._attempt = 1
+    notices = []
+    dl.retrying.connect(notices.append)
+    assert dl._verify(part, "a.pt") is False
+    assert not part.exists()  # 壊れた内容は残さない
+    assert len(notices) == 1
+
+
+def test_verify_fails_after_the_last_attempt(qapp, tmp_path):
+    part = tmp_path / "a.pt.part"
+    part.write_bytes(b"tampered")
+    dl = downloader.ModelDownloader()
+    dl._destination = tmp_path / "a.pt"
+    dl._sha256 = hashlib.sha256(b"body").hexdigest()
+    dl._attempt = downloader.MAX_ATTEMPTS
+    results = []
+    dl.finished.connect(lambda ok, msg: results.append((ok, msg)))
+    assert dl._verify(part, "a.pt") is False
+    assert not part.exists()
+    assert results[0][0] is False
 
 
 def test_cancel_after_completion_does_not_emit_again(stub_downloader):

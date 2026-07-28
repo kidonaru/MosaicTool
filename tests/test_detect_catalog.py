@@ -31,6 +31,13 @@ def test_confidence_is_within_percentage_range():
     assert all(1 <= m.confidence <= 100 for m in catalog.MODELS)
 
 
+def test_every_model_has_a_sha256():
+    # 64 桁の 16 進(検証をすり抜ける空文字や書き間違いを防ぐ)
+    for model in catalog.MODELS:
+        assert len(model.sha256) == 64
+        assert all(c in "0123456789abcdef" for c in model.sha256)
+
+
 def test_every_model_has_a_label_and_size():
     assert all(m.label for m in catalog.MODELS)
     assert all(m.size_mb > 0 for m in catalog.MODELS)

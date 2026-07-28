@@ -71,7 +71,8 @@ class DetectWindow(QDialog):
     結果の反映(範囲の追加)はメインウィンドウ側の責務。
     """
 
-    detect_requested = Signal(dict)      # {ファイル名: 信頼度(0.0〜1.0)}
+    # {ファイル名: {"conf": 信頼度(0.0〜1.0), "classes": クラス名}}
+    detect_requested = Signal(dict)
     detect_all_requested = Signal(dict)  # 同上。開いている全画像が対象
     models_changed = Signal()            # models/ の顔ぶれが変わった
     classes_requested = Signal()         # クラス一覧の問い合わせ

@@ -114,7 +114,9 @@ class RuntimeSetupDialog(QDialog):
         self._bar.setVisible(True)
         self._bar.setRange(0, 0)  # 全体サイズが分かるまでは不確定表示
         paths.models_dir().mkdir(parents=True, exist_ok=True)
-        self._downloader.start(model.url, paths.models_dir() / model.filename)
+        self._downloader.start(
+            model.url, paths.models_dir() / model.filename, model.sha256
+        )
 
     def _on_download_progress(self, received: int, total: int) -> None:
         if total <= 0:

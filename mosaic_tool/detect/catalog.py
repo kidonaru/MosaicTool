@@ -1,7 +1,7 @@
 """標準モデルのカタログ(セットアップ時に自動取得する .pt の定義)
 
 いずれも HuggingFace の Anzhc/Anzhcs_YOLOs から認証なしで取得できる
-セグメンテーションモデル。選定と推奨信頼度の根拠は docs/detection-models.md を参照。
+セグメンテーションモデル。推奨信頼度は実際に検出させて決めた値。
 """
 from __future__ import annotations
 
@@ -22,6 +22,9 @@ class CatalogModel:
     label: str        # 一覧に出す用途名(顔・目)
     size_mb: float
     confidence: int   # 推奨する信頼度しきい値 (%)
+    # 取得したファイルの SHA-256。.pt は読み込み時に pickle を展開するため、
+    # 配布元が差し替わった場合に気づかず実行しないよう固定しておく
+    sha256: str
 
     @property
     def url(self) -> str:
@@ -30,8 +33,14 @@ class CatalogModel:
 
 
 MODELS: tuple[CatalogModel, ...] = (
-    CatalogModel("Anzhc Face seg 640 v4 y11n.pt", "顔", 5.7, 25),
-    CatalogModel("Anzhc Eyes -seg-hd.pt", "目", 6.6, 40),
+    CatalogModel(
+        "Anzhc Face seg 640 v4 y11n.pt", "顔", 5.7, 25,
+        "1e77ad7bd349babd8a4a90478bfc965348642b63a8d95d3b43ee13db42fd0a64",
+    ),
+    CatalogModel(
+        "Anzhc Eyes -seg-hd.pt", "目", 6.6, 40,
+        "6be1c13ca7a51c2425e278e07e7ae3d4c94ee125b874a0104a142f4f5a35a308",
+    ),
 )
 
 

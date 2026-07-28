@@ -16,6 +16,10 @@ from mosaic_tool.detect.convert import (
 
 # 1 枚あたりの検出を待つ上限(モデル読み込みを含む初回を見込んで長めに取る)
 DETECT_TIMEOUT_MS = 120_000
+# 終了要求からの猶予(過ぎたら kill する)
+STOP_WAIT_MS = 3000
+# venv の Python が立ち上がるのを待つ上限(初回はディスクが冷えていて遅い)
+START_TIMEOUT_MS = 10_000
 # 異常終了時に表示する stderr の末尾の文字数
 STDERR_TAIL = 500
 
@@ -66,7 +70,7 @@ class DetectWorker(QObject):
     def request(self, image_path: str, models: dict, device: str) -> None:
         """検出を依頼する(結果は detected / failed で返る)
 
-        models はファイル名をキー、信頼度(0〜1)を値とする。
+        models はファイル名をキー、{"conf": 信頼度(0〜1), "classes": クラス名} を値とする。
         ワーカーは models\\ を全件読み込むが、推論するのはここに載せたものだけ。
         """
         if self._busy:
@@ -110,7 +114,7 @@ class DetectWorker(QObject):
         if process is None:
             return
         process.terminate()
-        if not process.waitForFinished(3000):
+        if not process.waitForFinished(STOP_WAIT_MS):
             process.kill()
 
     def _start(self, models: list[Path]) -> bool:
@@ -125,7 +129,7 @@ class DetectWorker(QObject):
         process.finished.connect(self._on_process_finished)
         process.errorOccurred.connect(self._on_process_error)
         process.start(cmd[0], cmd[1:])
-        if not process.waitForStarted(10_000):
+        if not process.waitForStarted(START_TIMEOUT_MS):
             self.failed.emit(f"検出ワーカーを起動できませんでした: {cmd[0]}")
             return False
         self._process = process
