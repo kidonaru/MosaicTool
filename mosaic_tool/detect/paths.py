@@ -9,17 +9,14 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from mosaic_tool.bundle import bundle_dir, repo_root
+
 MODELS_DIR_NAME = "models"
 RUNTIME_DIR_NAME = "runtime"
 MODEL_SUFFIX = ".pt"
 # runtime\ へコピーするワーカーのファイル名(venv の Python へ渡すため実体が要る)
 WORKER_SCRIPT_NAME = "detect_worker.py"
 UV_EXE_NAME = "uv.exe"
-
-
-def _repo_root() -> Path:
-    """ソース実行時のリポジトリ直下(このファイルは mosaic_tool/detect/ にある)"""
-    return Path(__file__).resolve().parents[2]
 
 
 def base_dir() -> Path:
@@ -29,20 +26,7 @@ def base_dir() -> Path:
     """
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
-    return _repo_root()
-
-
-def _bundle_dir() -> Path:
-    """同梱リソースの基準
-
-    PyInstaller は展開先を sys._MEIPASS で知らせる(onefile なら一時ディレクトリ、
-    onedir なら _internal)。パッケージ本体は PYZ に取り込まれ __file__ が実在
-    しないため、同梱物の探索には必ずこちらを使う。
-    """
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        return Path(meipass)
-    return _repo_root()
+    return repo_root()
 
 
 def models_dir() -> Path:
@@ -71,12 +55,12 @@ def is_runtime_ready() -> bool:
 
 
 def bundled_uv_path() -> Path:
-    return _bundle_dir() / UV_EXE_NAME
+    return bundle_dir() / UV_EXE_NAME
 
 
 def worker_script_source() -> Path:
     """同梱されたワーカー本体(.py の実体。PYZ 内のモジュールでは代用できない)"""
-    return _bundle_dir() / "mosaic_tool" / "detect" / "worker_main.py"
+    return bundle_dir() / "mosaic_tool" / "detect" / "worker_main.py"
 
 
 def worker_script_installed() -> Path:

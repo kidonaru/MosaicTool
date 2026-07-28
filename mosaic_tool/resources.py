@@ -3,11 +3,12 @@ from pathlib import Path
 
 from PySide6.QtGui import QIcon
 
+from mosaic_tool.bundle import bundle_dir
+
 
 def app_icon_path() -> Path:
-    # PyInstaller の onefile でも assets/ 配下に同梱するため、相対構成は開発時と同じ
-    # (mosaic_tool/ パッケージの 1 つ上がリポジトリ直下 / 展開先ルートに対応する)
-    return Path(__file__).resolve().parent.parent / "assets" / "icon.ico"
+    # PyInstaller では __file__ が実在しないため、展開先(sys._MEIPASS)を基準にする
+    return bundle_dir() / "assets" / "icon.ico"
 
 
 def load_app_icon() -> QIcon:
