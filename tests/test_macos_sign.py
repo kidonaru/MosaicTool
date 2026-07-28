@@ -64,6 +64,19 @@ def test_sign_app_is_skipped_without_identity(monkeypatch, tmp_path):
 
 
 def test_notarize_is_skipped_without_credentials(monkeypatch, tmp_path):
+    monkeypatch.setenv("MACOS_SIGN_IDENTITY", "Developer ID Application: X (TEAM)")
     for key in ("MACOS_NOTARY_APPLE_ID", "MACOS_NOTARY_PASSWORD", "MACOS_TEAM_ID"):
         monkeypatch.delenv(key, raising=False)
+    assert macos_sign.notarize_and_staple(tmp_path / "MosaicTool.app") is False
+
+
+def test_notarize_is_skipped_without_sign_identity(monkeypatch, tmp_path):
+    """署名 ID が無ければ、公証の資格情報が揃っていても投げない
+
+    ad-hoc 署名の .app を notarytool へ送っても必ず失敗するため。
+    """
+    monkeypatch.delenv("MACOS_SIGN_IDENTITY", raising=False)
+    monkeypatch.setenv("MACOS_NOTARY_APPLE_ID", "a@example.com")
+    monkeypatch.setenv("MACOS_NOTARY_PASSWORD", "pw")
+    monkeypatch.setenv("MACOS_TEAM_ID", "TEAM")
     assert macos_sign.notarize_and_staple(tmp_path / "MosaicTool.app") is False

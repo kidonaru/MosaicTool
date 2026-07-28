@@ -45,9 +45,8 @@ def emit_github_output(name: str, value: str) -> None:
 
 def stage(app: Path, stage_dir: Path) -> None:
     """展開時に中身が散らばらないよう、zip 内へトップレベルフォルダを 1 つ作る"""
+    # README の存在は main() がビルド前に確認済み
     readme = appinfo.repo_root() / "README.md"
-    if not readme.is_file():
-        appinfo.fail(f"同梱する README.md が見つかりません: {readme}")
     stage_dir.mkdir(parents=True, exist_ok=True)
     if app.is_dir():
         # .app はシンボリックリンクと実行ビットを保ったままコピーする

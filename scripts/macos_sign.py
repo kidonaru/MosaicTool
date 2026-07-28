@@ -66,8 +66,16 @@ def notary_credentials() -> dict[str, str] | None:
     return {"apple_id": apple_id, "password": password, "team_id": team_id}
 
 
-def notarize_and_staple(app: Path) -> bool:
-    """公証して staple する。資格情報が無ければ何もせず False を返す"""
+def notarize_and_staple(app: Path, identity: str = "") -> bool:
+    """公証して staple する。資格情報が無ければ何もせず False を返す
+
+    公証は Developer ID 署名済みの .app しか受け付けない。署名 ID が無いまま
+    投げると notarytool が失敗してパッケージ全体が落ちるため、先に弾く。
+    """
+    identity = identity or os.environ.get("MACOS_SIGN_IDENTITY", "")
+    if not identity:
+        print("-- 署名 ID が未設定のため公証をスキップします")
+        return False
     credentials = notary_credentials()
     if credentials is None:
         print("-- 公証の資格情報が未設定のためスキップします")
