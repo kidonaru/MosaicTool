@@ -16,6 +16,7 @@ DEFAULT_BLOCK = 10        # モザイクサイズ (px)
 DEFAULT_THRESHOLD = 10    # マス単位判定のしきい値 (%)
 DEFAULT_PEN_WIDTH = 20    # ペン太さ (px)
 DEFAULT_AUTOSAVE = True   # 自動保存
+DEFAULT_STRIP_META = False  # メタ削除(既定は元画像のメタ情報を引き継ぐ)
 DEFAULT_MODE = "pen"      # ツールモード ("pen" / "rect")
 DEFAULT_CONFIDENCE = 25   # 自動検出の信頼度しきい値 (%)
 DEFAULT_DEVICE = "auto"   # 推論デバイス ("auto" / "cpu")
@@ -24,6 +25,7 @@ _KEY_BLOCK = "mosaic/block"
 _KEY_THRESHOLD = "mosaic/threshold"
 _KEY_PEN_WIDTH = "tool/pen_width"
 _KEY_AUTOSAVE = "save/autosave"
+_KEY_STRIP_META = "save/strip_meta"
 _KEY_MODE = "tool/mode"
 _KEY_GEOMETRY = "window/geometry"
 # モデル別設定のキー接頭辞(<接頭辞>/<ファイル名>/<項目> で 1 モデル分になる)
@@ -50,6 +52,13 @@ class AppSettings:
         if not (minimum <= value <= maximum) or value % step != 0:
             return default
         return value
+
+    def _bool(self, key: str, default: bool) -> bool:
+        """bool として読み出す(QSettings は文字列で返すことがある)"""
+        value = self._qsettings.value(key, default)
+        if isinstance(value, str):
+            return value.lower() in ("true", "1")
+        return bool(value)
 
     # --- モザイクサイズ ---
 
@@ -78,13 +87,18 @@ class AppSettings:
     # --- 自動保存 ---
 
     def autosave(self) -> bool:
-        value = self._qsettings.value(_KEY_AUTOSAVE, DEFAULT_AUTOSAVE)
-        if isinstance(value, str):
-            return value.lower() in ("true", "1")
-        return bool(value)
+        return self._bool(_KEY_AUTOSAVE, DEFAULT_AUTOSAVE)
 
     def set_autosave(self, value: bool) -> None:
         self._qsettings.setValue(_KEY_AUTOSAVE, bool(value))
+
+    # --- メタ削除 ---
+
+    def strip_meta(self) -> bool:
+        return self._bool(_KEY_STRIP_META, DEFAULT_STRIP_META)
+
+    def set_strip_meta(self, value: bool) -> None:
+        self._qsettings.setValue(_KEY_STRIP_META, bool(value))
 
     # --- ツールモード ---
 
@@ -107,10 +121,7 @@ class AppSettings:
         ユーザーが models\\ へ置いたものは使いたくて置いたはずで、
         初期状態で無効だと「置いたのに動かない」という戸惑いを生む。
         """
-        value = self._qsettings.value(self._model_key(filename, "enabled"), True)
-        if isinstance(value, str):
-            return value.lower() in ("true", "1")
-        return bool(value)
+        return self._bool(self._model_key(filename, "enabled"), True)
 
     def set_model_enabled(self, filename: str, value: bool) -> None:
         self._qsettings.setValue(self._model_key(filename, "enabled"), bool(value))

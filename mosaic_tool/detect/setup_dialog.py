@@ -19,7 +19,7 @@ from mosaic_tool.detect.runtime import RuntimeInstaller, has_nvidia_gpu
 INTRO = (
     "自動検出を使うには、推論用の実行環境を用意する必要があります。\n"
     "ダウンロードには時間がかかります(回線状況により数分〜十数分)。\n"
-    "続けて標準の検出モデル(顔・目・髪 / 合計 約 20MB)を取得します。"
+    "続けて標準の検出モデル(顔・目 / 合計 約 13MB)を取得します。"
 )
 GPU_LABEL = "GPU を使う (NVIDIA / ダウンロード 約 2.5GB / 検出が速い)"
 GPU_DETECTED_NOTE = " ※NVIDIA GPU を検出しました"

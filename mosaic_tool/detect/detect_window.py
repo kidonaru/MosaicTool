@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QDialog,
     QGridLayout,
@@ -30,10 +31,23 @@ INITIAL_WIDTH = 620   # 初期サイズ。モデルが増えたぶんは一覧�
 INITIAL_HEIGHT = 300
 READY_TEXT = "推論環境: 構築済み"
 NOT_READY_TEXT = "推論環境: 未構築"
+LOADING_TEXT = "モデルを読み込み中..."
+REFRESHING_TEXT = "モデルを更新中..."
 NO_MODEL_TEXT = (
     "モデルがありません。セットアップすると標準モデルが取得されます。\n"
     "自分で用意した .pt は models フォルダへ置いて「更新」を押してください。"
 )
+
+
+class NoWheelSlider(QSlider):
+    """ホイールで値が変わらないスライダー
+
+    一覧はスクロール領域にあり、スクロールのつもりのホイールで
+    信頼度が書き換わってしまうため、ホイールは親へ受け流す。
+    """
+
+    def wheelEvent(self, event):
+        event.ignore()
 
 
 @dataclass
@@ -53,8 +67,9 @@ class DetectWindow(QDialog):
     結果の反映(範囲の追加)はメインウィンドウ側の責務。
     """
 
-    detect_requested = Signal(dict)   # {ファイル名: 信頼度(0.0〜1.0)}
-    models_changed = Signal()         # models/ の顔ぶれが変わった
+    detect_requested = Signal(dict)      # {ファイル名: 信頼度(0.0〜1.0)}
+    detect_all_requested = Signal(dict)  # 同上。開いている全画像が対象
+    models_changed = Signal()            # models/ の顔ぶれが変わった
 
     def __init__(self, settings: AppSettings, parent=None):
         super().__init__(parent)
@@ -77,7 +92,8 @@ class DetectWindow(QDialog):
         runtime_row.addWidget(self._setup_button)
         layout.addLayout(runtime_row)
 
-        group = QGroupBox("モデル")
+        self._group = QGroupBox("モデル")
+        group = self._group
         group_layout = QVBoxLayout(group)
         header = QHBoxLayout()
         header.addStretch()
@@ -101,6 +117,9 @@ class DetectWindow(QDialog):
         group_layout.addWidget(scroll)
         layout.addWidget(group, stretch=1)
 
+        self._status_label = QLabel(LOADING_TEXT)
+        self._status_label.setVisible(False)
+        layout.addWidget(self._status_label)
         self._bar = QProgressBar()
         self._bar.setVisible(False)
         layout.addWidget(self._bar)
@@ -109,6 +128,10 @@ class DetectWindow(QDialog):
         self._detect_button = QPushButton("検出実行")
         self._detect_button.clicked.connect(self._on_detect_clicked)
         buttons.addWidget(self._detect_button)
+        # 全ファイル実行: 検出と保存を開いている画像すべてに対して順に行う
+        self._detect_all_button = QPushButton("全ファイルに実行")
+        self._detect_all_button.clicked.connect(self._on_detect_all_clicked)
+        buttons.addWidget(self._detect_all_button)
         close_button = QPushButton("閉じる")
         close_button.clicked.connect(self.close)
         buttons.addWidget(close_button)
@@ -120,17 +143,35 @@ class DetectWindow(QDialog):
 
     def refresh(self) -> None:
         """推論環境の状態とモデル一覧を作り直す"""
-        ready = paths.is_runtime_ready()
-        self._runtime_label.setText(READY_TEXT if ready else NOT_READY_TEXT)
-        self._setup_button.setText("再セットアップ" if ready else "セットアップ")
-        filenames = [p.name for p in paths.model_files()]
-        if filenames != self._filenames:
-            self._filenames = filenames
-            self._rebuild_rows()
-            # 一覧の顔ぶれが変わったらワーカーは古い構成のままなので伝える
-            self.models_changed.emit()
-        self._empty_label.setVisible(not filenames)
+        self._set_busy(True, REFRESHING_TEXT)
+        # 一覧の組み直しとワーカーの畳み込みで待たされるため、先に表示を出す
+        QApplication.processEvents()
+        try:
+            ready = paths.is_runtime_ready()
+            self._runtime_label.setText(READY_TEXT if ready else NOT_READY_TEXT)
+            self._setup_button.setText("再セットアップ" if ready else "セットアップ")
+            filenames = [p.name for p in paths.model_files()]
+            if filenames != self._filenames:
+                self._filenames = filenames
+                self._rebuild_rows()
+                # 一覧の顔ぶれが変わったらワーカーは古い構成のままなので伝える
+                self.models_changed.emit()
+            self._empty_label.setVisible(not filenames)
+        finally:
+            # 検出中に更新された場合は実行中の表示へ戻す
+            self._set_busy(self._running, LOADING_TEXT)
         self._update_detect_enabled()
+
+    def _set_busy(self, busy: bool, text: str = "") -> None:
+        """処理中はモデル一覧を非アクティブにし、進捗を不確定表示で出す"""
+        self._group.setEnabled(not busy)
+        self._setup_button.setEnabled(not busy)
+        if busy:
+            self._status_label.setText(text)
+            # 所要時間が読めないうちは不確定表示にする
+            self._bar.setRange(0, 0)
+        self._status_label.setVisible(busy)
+        self._bar.setVisible(busy)
 
     def _rebuild_rows(self) -> None:
         while self._grid.count():
@@ -149,7 +190,7 @@ class DetectWindow(QDialog):
             check = QCheckBox(filename)
             check.setChecked(self._settings.model_enabled(filename))
             label = QLabel(entry.label if entry else "")
-            slider = QSlider(Qt.Orientation.Horizontal)
+            slider = NoWheelSlider(Qt.Orientation.Horizontal)
             slider.setRange(CONFIDENCE_MIN, CONFIDENCE_MAX)
             slider.setValue(
                 self._settings.model_confidence(
@@ -182,13 +223,14 @@ class DetectWindow(QDialog):
         self._update_detect_enabled()
 
     def set_running(self, running: bool) -> None:
-        """検出中は実行ボタンを止め、終わったらプログレスを隠す"""
+        """検出中は操作を非アクティブにし、終わったらプログレスを隠す"""
         self._running = running
-        if not running:
-            self._bar.setVisible(False)
+        # 実行中に一覧をいじられるとワーカーの構成とずれるため、まとめて止める
+        self._set_busy(running, LOADING_TEXT)
         self._update_detect_enabled()
 
     def set_progress(self, done: int, total: int) -> None:
+        self._status_label.setVisible(False)
         self._bar.setVisible(True)
         self._bar.setRange(0, max(total, 1))
         self._bar.setValue(done)
@@ -202,12 +244,14 @@ class DetectWindow(QDialog):
         }
 
     def _update_detect_enabled(self) -> None:
-        self._detect_button.setEnabled(
+        enabled = (
             paths.is_runtime_ready()
             and self._image_available
             and not self._running
             and bool(self.enabled_models())
         )
+        self._detect_button.setEnabled(enabled)
+        self._detect_all_button.setEnabled(enabled)
 
     # --- 操作 ---
 
@@ -233,5 +277,11 @@ class DetectWindow(QDialog):
         models = self.enabled_models()
         if not models:
             return
-        self.set_progress(0, len(models))
         self.detect_requested.emit(models)
+
+    def _on_detect_all_clicked(self) -> None:
+        models = self.enabled_models()
+        if not models:
+            return
+        # 実行してよいかの確認は、対象の枚数を知るメインウィンドウ側で出す
+        self.detect_all_requested.emit(models)

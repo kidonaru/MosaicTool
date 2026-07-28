@@ -119,8 +119,13 @@ NSFW-API の README は Mask mAP@0.5 = 0.995 と謳うが、これは実写ド�
 
 2D 向けの候補(いずれも Civitai):
 
-- [Cock and Ball Detection 2D edition](https://civitai.com/models/310687) — YOLOv11x seg、採用済み
-- [ADetailer Vagina / Pussy Model](https://civitai.com/models/150872) — seg 版あり
+- [Anime NSFW Detection / ADetailer All-in-One](https://civitai.com/models/1313556) — **現在の推奨**。
+  `yolov11s-seg` ベース、18MB の 1 ファイルで NSFW 領域を複数クラスまとめて検出する
+  (内訳は配布元を参照)。学習データは 2D イラストのみ。作者の推奨しきい値は 50〜80% で、
+  `nsfw-seg-vagina-s.pt` の 0.19〜0.22 とは精度の水準が違う。zip 配布のため展開して `models\` へ置く
+- [Cock and Ball Detection 2D edition](https://civitai.com/models/310687) — YOLOv11x seg、119MB。
+  上記の all-in-one で penis もカバーできるため役割は重複する
+- [ADetailer Vagina / Pussy Model](https://civitai.com/models/150872) — 学習データにアニメを含まないと明記。2D には不適
 - [assDetailer](https://civitai.com/models/1156687) — v2-segm
 - [Eye Detailer/Segmentation](https://civitai.com/models/334668) — 目の seg
 
@@ -135,5 +140,8 @@ MosaicTool 本体は MIT だが、**モデルを同梱せずユーザーが用�
 
 - **検出元モデルの表示**: 現在 `Region` はどのモデル由来かを持たないため、UI から判別できない。
   不要なモデルを外したいときの手がかりが無い(モデル単位の ON/OFF は自動検出ウィンドウで行える)
-- **髪モデルの信頼度**: `Anzhc HeadHair seg y8n.pt` は標準モデルに加えたが、
-  この検証には含めていない。推奨値は暫定で 25%
+- **クラス単位のフィルタ**: `worker_main.py` は検出クラスで絞り込んでいないため、
+  all-in-one モデルを使うとモデルが対応する全クラスが一律にモザイク対象になる。
+  対象を選びたい場合はクラス単位の ON/OFF が要る
+- **all-in-one モデルの実データ検証**: [Civitai 1313556](https://civitai.com/models/1313556) は
+  未検証。同じ 29 枚で `cockAndBallDetection2D_v20.pt` / `nsfw-seg-vagina-s.pt` と比較したい

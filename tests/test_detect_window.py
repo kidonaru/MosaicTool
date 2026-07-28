@@ -2,7 +2,8 @@
 import os
 
 import pytest
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QPoint, QPointF, QSettings, Qt
+from PySide6.QtGui import QWheelEvent
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication  # noqa: E402
@@ -64,6 +65,21 @@ def test_unchecking_disables_the_slider(window):
     assert row.slider.isEnabled() is False
 
 
+def test_wheel_does_not_change_the_slider(window):
+    # 一覧をスクロールするつもりのホイールで信頼度が変わらないこと
+    row = window._rows["unknown.pt"]
+    before = row.slider.value()
+    pos = QPointF(row.slider.rect().center())
+    row.slider.wheelEvent(
+        QWheelEvent(
+            pos, pos, QPoint(), QPoint(0, 120),
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase, False,
+        )
+    )
+    assert row.slider.value() == before
+
+
 def test_confidence_change_is_persisted(window, tmp_path):
     window._rows["unknown.pt"].slider.setValue(70)
     reopened = AppSettings(
@@ -99,11 +115,47 @@ def test_detect_requested_carries_the_enabled_models(window):
     assert received == [{"Anzhc Eyes -seg-hd.pt": 0.4}]
 
 
+def test_detect_all_requested_carries_the_enabled_models(window):
+    window._rows["unknown.pt"].check.setChecked(False)
+    received = []
+    window.detect_all_requested.connect(received.append)
+    window._on_detect_all_clicked()
+    assert received == [{"Anzhc Eyes -seg-hd.pt": 0.4}]
+
+
+def test_detect_all_button_follows_the_detect_button(window):
+    # 実行可否の条件は 1 枚だけの検出と同じ
+    window.set_image_available(False)
+    assert window._detect_all_button.isEnabled() is False
+    window.set_image_available(True)
+    assert window._detect_all_button.isEnabled() is True
+
+
 def test_running_state_disables_the_detect_button(window):
     window.set_running(True)
     assert window._detect_button.isEnabled() is False
+    assert window._detect_all_button.isEnabled() is False
     window.set_running(False)
     assert window._detect_button.isEnabled() is True
+    assert window._detect_all_button.isEnabled() is True
+
+
+def test_running_state_deactivates_the_model_area(window):
+    window.set_running(True)
+    assert window._group.isEnabled() is False
+    assert window._setup_button.isEnabled() is False
+    window.set_running(False)
+    assert window._group.isEnabled() is True
+    assert window._setup_button.isEnabled() is True
+
+
+def test_running_state_shows_loading_until_progress_arrives(window):
+    window.set_running(True)
+    assert window._status_label.isVisibleTo(window) is True
+    # 進捗が読めないうちは不確定表示にする
+    assert (window._bar.minimum(), window._bar.maximum()) == (0, 0)
+    window.set_progress(1, 3)
+    assert window._status_label.isVisibleTo(window) is False
 
 
 def test_progress_bar_reflects_the_reported_counts(window):
@@ -117,6 +169,33 @@ def test_progress_bar_is_hidden_when_the_run_ends(window):
     window.set_progress(1, 3)
     window.set_running(False)
     assert window._bar.isVisibleTo(window) is False
+
+
+def test_refresh_shows_loading_while_it_runs(window, monkeypatch):
+    """更新の最中はモデル一覧を非アクティブにしてロード中を出す"""
+    seen = {}
+    original = paths.model_files
+
+    def spy():
+        seen["enabled"] = window._group.isEnabled()
+        seen["label"] = window._status_label.isVisibleTo(window)
+        seen["text"] = window._status_label.text()
+        return original()
+
+    monkeypatch.setattr(paths, "model_files", spy)
+    window.refresh()
+    assert seen == {"enabled": False, "label": True, "text": "モデルを更新中..."}
+    # 終わったら元に戻る
+    assert window._group.isEnabled() is True
+    assert window._status_label.isVisibleTo(window) is False
+    assert window._bar.isVisibleTo(window) is False
+
+
+def test_refresh_during_a_run_keeps_the_running_display(window):
+    window.set_running(True)
+    window.refresh()
+    assert window._group.isEnabled() is False
+    assert window._status_label.text() == "モデルを読み込み中..."
 
 
 def test_refresh_picks_up_new_files(window, tmp_path):

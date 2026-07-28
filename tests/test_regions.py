@@ -1,6 +1,10 @@
 from PySide6.QtCore import QPointF, QRectF
 
-from mosaic_tool.regions import Region, RegionKind
+from mosaic_tool.regions import Region, RegionKind, drop_duplicate_regions
+
+
+def _rect(x, y, w=100, h=50) -> Region:
+    return Region(kind=RegionKind.RECT, rect=QRectF(x, y, w, h))
 
 
 def test_rect_local_path_bounds():
@@ -67,6 +71,33 @@ def test_polygon_is_closed_shape():
     )
     assert r.local_path().contains(QPointF(80, 20))
     assert not r.local_path().contains(QPointF(20, 40))
+
+
+def test_duplicate_of_an_existing_region_is_dropped():
+    assert drop_duplicate_regions([_rect(0, 0)], [_rect(0, 0)]) == []
+
+
+def test_slightly_shifted_region_is_treated_as_the_same():
+    # 数 px のずれは同じ対象の検出とみなす
+    assert drop_duplicate_regions([_rect(2, 1)], [_rect(0, 0)]) == []
+
+
+def test_different_region_is_kept():
+    kept = drop_duplicate_regions([_rect(200, 200)], [_rect(0, 0)])
+    assert len(kept) == 1
+
+
+def test_duplicates_within_the_new_regions_are_reduced_to_one():
+    # 複数のモデルが同じ対象を捉えた場合も 1 つだけ残す
+    kept = drop_duplicate_regions([_rect(0, 0), _rect(1, 0), _rect(200, 200)], [])
+    assert len(kept) == 2
+
+
+def test_moved_existing_region_is_compared_at_its_current_position():
+    # 既存範囲は変形後の位置で比べる
+    moved = Region(kind=RegionKind.RECT, rect=QRectF(0, 0, 100, 50), pos=QPointF(200, 200))
+    assert drop_duplicate_regions([_rect(200, 200)], [moved]) == []
+    assert len(drop_duplicate_regions([_rect(0, 0)], [moved])) == 1
 
 
 def test_polygon_rotation_90_around_center():

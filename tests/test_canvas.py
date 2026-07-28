@@ -2,14 +2,15 @@
 import os
 
 import pytest
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt
+from PySide6.QtGui import QMouseEvent
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from PIL import Image  # noqa: E402
 
-from mosaic_tool.canvas import MosaicCanvas, RegionItem  # noqa: E402
+from mosaic_tool.canvas import MosaicCanvas, RegionItem, ToolMode  # noqa: E402
 from mosaic_tool.mosaic import paths_to_mask, snap_mask_to_grid  # noqa: E402
 from mosaic_tool.regions import Region, RegionKind  # noqa: E402
 
@@ -148,3 +149,38 @@ def test_add_regions_with_empty_list_pushes_no_undo(qapp):
     canvas.undo()
     # 空追加は Undo を消費しないため、直前の追加が取り消される
     assert canvas.get_regions() == []
+
+
+def _press(canvas: MosaicCanvas, scene_pt: QPointF) -> None:
+    """シーン座標を指定して左ボタンの押下を送る"""
+    pos = QPointF(canvas.mapFromScene(scene_pt))
+    canvas.mousePressEvent(
+        QMouseEvent(
+            QEvent.Type.MouseButtonPress,
+            pos,
+            pos,
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+    )
+
+
+CREATION_MODES = [(ToolMode.RECT, "_rect_start"), (ToolMode.PEN, "_pen_points")]
+
+
+@pytest.mark.parametrize("mode, attr", CREATION_MODES)
+def test_press_inside_image_starts_creation(qapp, mode, attr):
+    canvas = _canvas_with_image(qapp)
+    canvas.set_mode(mode)
+    _press(canvas, QPointF(100, 100))
+    assert getattr(canvas, attr)
+
+
+@pytest.mark.parametrize("mode, attr", CREATION_MODES)
+def test_press_outside_image_does_not_start_creation(qapp, mode, attr):
+    # 画像の外側(余白)を押しても範囲は作らない
+    canvas = _canvas_with_image(qapp)
+    canvas.set_mode(mode)
+    _press(canvas, QPointF(-30, -30))
+    assert not getattr(canvas, attr)

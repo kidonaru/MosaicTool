@@ -19,7 +19,7 @@ class CatalogModel:
     """標準モデル 1 件の定義"""
 
     filename: str
-    label: str        # 一覧に出す用途名(顔・目・髪)
+    label: str        # 一覧に出す用途名(顔・目)
     size_mb: float
     confidence: int   # 推奨する信頼度しきい値 (%)
 
@@ -32,8 +32,6 @@ class CatalogModel:
 MODELS: tuple[CatalogModel, ...] = (
     CatalogModel("Anzhc Face seg 640 v4 y11n.pt", "顔", 5.7, 25),
     CatalogModel("Anzhc Eyes -seg-hd.pt", "目", 6.6, 40),
-    # 髪の推奨値は未検証のため、全体の既定値と同じ 25% を置く
-    CatalogModel("Anzhc HeadHair seg y8n.pt", "髪", 6.5, 25),
 )
 
 

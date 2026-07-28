@@ -43,6 +43,20 @@ _META_KEYS = ("exif", "icc_profile", "xmp", "dpi")
 # JPEG の APP1 セグメントに収まる最大バイト数。超えると Pillow が保存に失敗する
 _JPEG_APP1_MAX = 65533
 
+# メタ削除時も残す info のキー(見た目に影響するのでメタ情報とは扱わない)
+_PIXEL_INFO_KEYS = ("transparency",)
+
+
+def _without_meta(img: Image.Image) -> Image.Image:
+    """メタ情報を落とした複製を返す
+
+    Pillow は保存時、明示指定のないメタ情報を元画像の info から拾うため、
+    保存引数を空にするだけでは削除できない。
+    """
+    stripped = img.copy()
+    stripped.info = {k: v for k, v in img.info.items() if k in _PIXEL_INFO_KEYS}
+    return stripped
+
 
 def _meta_kwargs(img: Image.Image, suffix: str) -> dict:
     """元画像の info から保存時に引き継ぐメタ情報を組み立てる"""
@@ -63,13 +77,16 @@ def _meta_kwargs(img: Image.Image, suffix: str) -> dict:
     return kwargs
 
 
-def save_image(img: Image.Image, dest: Path) -> None:
+def save_image(img: Image.Image, dest: Path, *, keep_meta: bool = True) -> None:
     """元と同形式で保存する。JPG は品質 95。親フォルダは自動作成
 
     Exif / ICC プロファイル等のメタ情報は元画像から引き継ぐ。
+    keep_meta=False なら引き継がず、メタ情報を削除して保存する。
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     suffix = dest.suffix.lower()
+    if not keep_meta:
+        img = _without_meta(img)
     if suffix in JPEG_EXTS:
         if img.mode not in ("RGB", "L"):
             # JPEG はアルファ非対応のため変換する

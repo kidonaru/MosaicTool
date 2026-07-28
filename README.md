@@ -55,15 +55,17 @@ YOLO 形式の検出モデルで、モザイク範囲を自動で追加できま
 
 1. ツールバーの「自動検出」(または `D` キー) を押すと自動検出ウィンドウが開きます
 2. 初回は「セットアップ」を押します。推論用の実行環境 (CPU 版 約 250MB / GPU 版 約 2.5GB) と、
-   標準の検出モデル 3 件 (顔・目・髪 / 合計 約 20MB) がダウンロードされます。
+   標準の検出モデル 2 件 (顔・目 / 合計 約 13MB) がダウンロードされます。
    `MosaicTool.exe` と同じ場所の `runtime` / `models` フォルダに入ります
 3. 使うモデルにチェックを入れ、モデルごとに信頼度 (%) を決めて「検出実行」を押します
+4. 「全ファイルに実行」を押すと、確認のうえ開いている全画像に検出と保存を順に行います
 
 信頼度を下げると検出されやすくなります。適切な値はモデルによって違うため、
 一覧の初期値は検証済みの推奨値です (根拠は [docs/detection-models.md](https://github.com/kidonaru/MosaicTool/blob/main/docs/detection-models.md))。
 
 検出された範囲は通常の範囲と同じように移動・変形・削除でき、`Ctrl+Z` 一回でまとめて取り消せます。
-既に引いてある範囲は消えません。
+既に引いてある範囲は消えません。既にある範囲とほぼ重なる検出は追加されないため、
+検出を繰り返しても同じ範囲は増えません。
 
 ### 標準モデル
 
@@ -73,18 +75,21 @@ YOLO 形式の検出モデルで、モザイク範囲を自動で追加できま
 |---|---|---|
 | `Anzhc Face seg 640 v4 y11n.pt` | 顔 | 5.7MB |
 | `Anzhc Eyes -seg-hd.pt` | 目 | 6.6MB |
-| `Anzhc HeadHair seg y8n.pt` | 髪 | 6.5MB |
 
-### その他の検出モデル
+### NSFW 検出モデル
 
-以下は自動ダウンロードの対象外です。手動でダウンロードして `models` フォルダへ置き、
-自動検出ウィンドウの「更新」を押すと一覧に現れます。
+NSFW 向けのモデルは自動ダウンロードの対象外です。以下の 1 件で 2D イラストの主要な対象を
+まとめて検出できます。
 
 | モデル | 対象 | 入手先 | 推奨信頼度 |
 |---|---|---|---|
-| `cockAndBallDetection2D_v20.pt` | penis (2D) | [Civitai 310687](https://civitai.com/models/310687) (要ログイン) | 20% |
-| `nsfw-seg-vagina-s.pt` | vagina | [NSFW-API/NSFW_Segmentation](https://huggingface.co/NSFW-API/NSFW_Segmentation) | 15% |
-| `Anzhc Breasts Seg v1 1024s.pt` | 胸 | [Anzhc/Anzhcs_YOLOs](https://huggingface.co/Anzhc/Anzhcs_YOLOs) | 25% |
+| Anime NSFW Detection (ADetailer All-in-One) | NSFW 領域 (複数クラス) | [Civitai 1313556](https://civitai.com/models/1313556) (要ログイン) | 50〜80% |
+
+`yolov11s-seg` ベースのセグメンテーションモデルで、2D イラストのみで学習されています。
+zip で配布されるため、展開した `.pt` を `models` フォルダへ置き、自動検出ウィンドウの「更新」を
+押すと一覧に現れます (検出対象の内訳と派生版は配布元を参照)。
+
+検出クラスを選ぶ機能は無いため、チェックを入れるとモデルが対応する全クラスがモザイク対象になります。
 
 `task=segment` のモデルは多角形の範囲になり、`task=detect` のモデルは矩形になります。
 モデルのライセンスはそれぞれの配布元に従います (MosaicTool 本体は MIT ですが、
@@ -102,6 +107,7 @@ YOLO 形式の検出モデルで、モザイク範囲を自動で追加できま
 - モザイクサイズ
 - ペン太さ
 - 自動保存の ON/OFF
+- メタ削除の ON/OFF(既定は OFF。ON にすると Exif / ICC プロファイル等を引き継がずに保存する)
 - ツールモード(ペン / 矩形、既定はペン)
 - 検出モデルごとの ON/OFF と信頼度
 
