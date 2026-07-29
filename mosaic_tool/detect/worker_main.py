@@ -12,6 +12,22 @@ import json
 import sys
 from pathlib import Path
 
+# プロトコル(1 行 = 1 JSON 応答)に使う標準出力。reserve_protocol_stdout() で確保する
+_protocol_out = sys.stdout
+
+
+def reserve_protocol_stdout() -> None:
+    """応答用に本物の標準出力を確保し、それ以外の出力を標準エラーへ逃がす
+
+    ultralytics は初回 import 時に設定ファイルの作成メッセージを標準出力へ書く。
+    1 行 = 1 応答の前提が崩れると呼び出し側が JSON として解釈できず、
+    「初回だけ検出に失敗する」状態になるため、ライブラリを import する前に呼ぶ。
+    """
+    global _protocol_out
+    _protocol_out = sys.stdout
+    sys.stdout = sys.stderr
+
+
 def load_models(model_paths: list[str]) -> list[tuple]:
     """モデルを読み込む((表示名, モデル) の列を返す)"""
     from ultralytics import YOLO
@@ -111,10 +127,12 @@ def handle_request(models: list[tuple], line: str, emit) -> dict:
 
 
 def _emit(payload: dict) -> None:
-    print(json.dumps(payload, ensure_ascii=False), flush=True)
+    print(json.dumps(payload, ensure_ascii=False), file=_protocol_out, flush=True)
 
 
 def main(argv: list[str]) -> int:
+    # ultralytics を読み込む前に、応答用の標準出力を確保する
+    reserve_protocol_stdout()
     model_paths = argv[1:]
     if not model_paths:
         _emit({"ok": False, "error": "検出モデルが指定されていません"})
