@@ -1,5 +1,5 @@
 """同梱 OpenSSL の組み合わせ検証の確認"""
-from pathlib import Path
+from pathlib import PureWindowsPath
 
 import check_bundled_openssl as checker
 
@@ -61,7 +61,9 @@ def test_non_binary_entries_are_ignored():
 
 def test_entries_nested_deeper_are_found():
     toc = repr((("meta",), [[(r"libssl-3.dll", r"C:\x\libssl-3.dll", "BINARY")]]))
-    assert checker.openssl_sources(toc) == {"-3.dll": {"libssl": Path(r"C:\x\libssl-3.dll")}}
+    assert checker.openssl_sources(toc) == {
+        "-3.dll": {"libssl": PureWindowsPath(r"C:\x\libssl-3.dll")}
+    }
 
 
 def test_qt_openssl_backend_is_detected():

@@ -6,7 +6,7 @@ from enum import Enum, auto
 from typing import NamedTuple
 
 from PIL import Image
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -703,21 +703,58 @@ class MosaicCanvas(QGraphicsView):
             return
         super().keyPressEvent(event)
 
-    def wheelEvent(self, event):
-        # ホイールは常にズーム(スクロールは中ボタン/選択モードのドラッグで行う)
-        zoom_in = event.angleDelta().y() > 0
+    def _zoom_at(self, factor: float, view_pos: QPointF) -> None:
+        """view_pos(ビュー座標)の点を固定したまま表示倍率を factor 倍する"""
         current = self.transform().m11()
+        if current <= 0 or factor <= 0:
+            return
         # フィット表示で既に範囲外の倍率になっていることがあるため、
         # その場合は倍率を跳ねさせずその向きのズームだけを止める
-        target = current
-        if zoom_in and current < VIEW_SCALE_MAX:
-            target = min(current * ZOOM_STEP, VIEW_SCALE_MAX)
-        elif not zoom_in and current > VIEW_SCALE_MIN:
-            target = max(current / ZOOM_STEP, VIEW_SCALE_MIN)
-        factor = target / current if current > 0 else 1.0
-        if factor != 1.0:
-            self.scale(factor, factor)
-            self._sync_view_scale()
+        # (上限/下限の代わりに current を使い、行き過ぎ側へは動かさない)
+        target = current * factor
+        if target > current:
+            target = min(target, max(current, VIEW_SCALE_MAX))
+        else:
+            target = max(target, min(current, VIEW_SCALE_MIN))
+        applied = target / current
+        if applied == 1.0:
+            return
+        # 拡縮の中心を指定位置に固定する(ピンチはマウス位置と一致しないため
+        # AnchorUnderMouse に頼らず、拡縮前後のズレを自前で打ち消す)
+        anchor = self.transformationAnchor()
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
+        before = self.mapToScene(view_pos.toPoint())
+        self.scale(applied, applied)
+        shift = self.mapToScene(view_pos.toPoint()) - before
+        self.translate(shift.x(), shift.y())
+        self.setTransformationAnchor(anchor)
+        self._sync_view_scale()
+
+    def viewportEvent(self, event):
+        # トラックパッドのピンチイン/アウトで拡縮する(macOS のネイティブジェスチャ)
+        if (
+            event.type() == QEvent.Type.NativeGesture
+            and event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture
+        ):
+            self._zoom_at(1.0 + event.value(), event.position())
+            return True
+        return super().viewportEvent(event)
+
+    def wheelEvent(self, event):
+        # トラックパッドの 2 本指スクロール(ピクセル単位の delta を持つ)は
+        # 画像のスライドに使う。拡縮はピンチ、または修飾キー併用のホイール。
+        zoom_keys = event.modifiers() & (
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier
+        )
+        if not event.pixelDelta().isNull() and not zoom_keys:
+            super().wheelEvent(event)
+            return
+        # マウスホイールはズーム(スクロールは中ボタン/選択モードのドラッグで行う)
+        notches = event.angleDelta().y() / 120.0
+        if notches == 0:
+            super().wheelEvent(event)
+            return
+        self._zoom_at(ZOOM_STEP**notches, event.position())
         event.accept()
 
     def mousePressEvent(self, event):

@@ -35,7 +35,8 @@ class FakeDownloader(QObject):
 
 
 def test_cpu_is_selected_by_default(qapp, monkeypatch):
-    # GPU があると判定される環境でも既定は CPU
+    # GPU があると判定される環境でも既定は CPU(選択肢を出す OS でのみ意味を持つ)
+    monkeypatch.setattr(setup_dialog.runtime, "supports_gpu_choice", lambda: True)
     monkeypatch.setattr(setup_dialog, "has_nvidia_gpu", lambda: True)
     dialog = setup_dialog.RuntimeSetupDialog()
     assert dialog._cpu_radio.isChecked() is True
@@ -108,3 +109,20 @@ def test_setup_accepts_immediately_when_no_model_is_pending(qapp, monkeypatch, t
     dialog = setup_dialog.RuntimeSetupDialog()
     dialog._on_runtime_finished(True, "完了")
     assert dialog.result() == QDialog.DialogCode.Accepted
+
+
+def test_macos_hides_gpu_choice(monkeypatch, qapp):
+    # macOS はインストール内容が 1 通りしかないため選択肢を出さない
+    monkeypatch.setattr(setup_dialog.runtime, "supports_gpu_choice", lambda: False)
+    dialog = setup_dialog.RuntimeSetupDialog()
+    assert dialog._gpu_radio is None
+    assert dialog._cpu_radio is None
+
+
+def test_macos_start_requests_cpu_install(monkeypatch, qapp):
+    monkeypatch.setattr(setup_dialog.runtime, "supports_gpu_choice", lambda: False)
+    dialog = setup_dialog.RuntimeSetupDialog()
+    called = []
+    monkeypatch.setattr(dialog._installer, "start", lambda use_gpu: called.append(use_gpu))
+    dialog._start()
+    assert called == [False]

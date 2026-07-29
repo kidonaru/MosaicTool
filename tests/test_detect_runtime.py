@@ -1,10 +1,11 @@
 """推論環境セットアップのコマンド組み立ての検証(uv は実行しない)"""
+import sys
 from pathlib import Path
 
 from mosaic_tool.detect import runtime
 
-UV = Path("C:/app/uv.exe")
-RUNTIME = Path("C:/app/runtime")
+UV = Path("/app/uv")
+RUNTIME = Path("/app/runtime")
 
 
 def test_venv_command_pins_python_version():
@@ -31,7 +32,8 @@ def test_cpu_install_has_no_cuda_index():
     assert "--extra-index-url" not in cmd
 
 
-def test_gpu_install_adds_cuda_index():
+def test_gpu_install_adds_cuda_index(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
     cmd = runtime.install_command(UV, RUNTIME, use_gpu=True)
     assert cmd[-2:] == ["--extra-index-url", runtime.TORCH_CUDA_INDEX_URL]
 
@@ -41,3 +43,48 @@ def test_has_nvidia_gpu_uses_nvidia_smi(monkeypatch):
     assert runtime.has_nvidia_gpu()
     monkeypatch.setattr(runtime.shutil, "which", lambda name: None)
     assert not runtime.has_nvidia_gpu()
+
+
+def test_gpu_install_has_no_cuda_index_on_macos(monkeypatch):
+    # macOS に CUDA ビルドは存在しない(通常の wheel が MPS 対応済み)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    cmd = runtime.install_command(UV, RUNTIME, use_gpu=True)
+    assert "--extra-index-url" not in cmd
+
+
+def test_gpu_choice_is_hidden_on_macos(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert not runtime.supports_gpu_choice()
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert runtime.supports_gpu_choice()
+
+
+def test_resolve_device_uses_mps_for_auto_on_macos(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert runtime.resolve_device("auto") == "mps"
+    assert runtime.resolve_device("cpu") == "cpu"
+
+
+def test_resolve_device_delegates_to_ultralytics_on_windows(monkeypatch):
+    # Windows では空文字を渡して ultralytics の自動選択に任せる
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert runtime.resolve_device("auto") == ""
+    assert runtime.resolve_device("cpu") == "cpu"
+
+
+def test_ensure_uv_executable_adds_exec_bit_on_posix(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    uv = tmp_path / "uv"
+    uv.write_bytes(b"")
+    uv.chmod(0o644)
+    runtime.ensure_uv_executable(uv)
+    assert uv.stat().st_mode & 0o111
+
+
+def test_ensure_uv_executable_is_noop_on_windows(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "platform", "win32")
+    uv = tmp_path / "uv.exe"
+    uv.write_bytes(b"")
+    # 存在しないファイルでも例外を出さないこと(Windows では何もしない)
+    runtime.ensure_uv_executable(tmp_path / "missing.exe")
+    runtime.ensure_uv_executable(uv)

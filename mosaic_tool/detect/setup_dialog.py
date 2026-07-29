@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from mosaic_tool.detect import downloader, paths
+from mosaic_tool.detect import downloader, paths, runtime
 from mosaic_tool.detect.catalog import CatalogModel
 from mosaic_tool.detect.downloader import ModelDownloader
 from mosaic_tool.detect.runtime import RuntimeInstaller, has_nvidia_gpu
@@ -40,13 +40,17 @@ class RuntimeSetupDialog(QDialog):
         self.resize(680, 460)
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(INTRO))
-        gpu_label = GPU_LABEL + (GPU_DETECTED_NOTE if has_nvidia_gpu() else "")
-        self._gpu_radio = QRadioButton(gpu_label)
-        self._cpu_radio = QRadioButton(CPU_LABEL)
-        # 既定は常に CPU。GPU は容量が大きいため明示的に選んでもらう
-        self._cpu_radio.setChecked(True)
-        layout.addWidget(self._gpu_radio)
-        layout.addWidget(self._cpu_radio)
+        # macOS はインストール内容が 1 通りしかないため選択肢を出さない
+        self._gpu_radio: QRadioButton | None = None
+        self._cpu_radio: QRadioButton | None = None
+        if runtime.supports_gpu_choice():
+            gpu_label = GPU_LABEL + (GPU_DETECTED_NOTE if has_nvidia_gpu() else "")
+            self._gpu_radio = QRadioButton(gpu_label)
+            self._cpu_radio = QRadioButton(CPU_LABEL)
+            # 既定は常に CPU。GPU は容量が大きいため明示的に選んでもらう
+            self._cpu_radio.setChecked(True)
+            layout.addWidget(self._gpu_radio)
+            layout.addWidget(self._cpu_radio)
         self._log = QPlainTextEdit()
         self._log.setReadOnly(True)
         layout.addWidget(self._log)
@@ -75,7 +79,8 @@ class RuntimeSetupDialog(QDialog):
     def _start(self) -> None:
         self._running = True
         self._set_inputs_enabled(False)
-        self._installer.start(use_gpu=self._gpu_radio.isChecked())
+        use_gpu = self._gpu_radio is not None and self._gpu_radio.isChecked()
+        self._installer.start(use_gpu=use_gpu)
 
     def _cancel(self) -> None:
         if self._running:
@@ -85,8 +90,9 @@ class RuntimeSetupDialog(QDialog):
         self.reject()
 
     def _set_inputs_enabled(self, enabled: bool) -> None:
-        self._gpu_radio.setEnabled(enabled)
-        self._cpu_radio.setEnabled(enabled)
+        for radio in (self._gpu_radio, self._cpu_radio):
+            if radio is not None:
+                radio.setEnabled(enabled)
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(enabled)
 
     def _on_runtime_finished(self, ok: bool, message: str) -> None:

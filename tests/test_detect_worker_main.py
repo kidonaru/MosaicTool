@@ -1,4 +1,6 @@
 """検出ワーカーの検証(ultralytics は入れず、偽のモデルで振る舞いだけ確かめる)"""
+import io
+import sys
 from types import SimpleNamespace
 
 from mosaic_tool.detect import worker_main
@@ -230,3 +232,23 @@ def test_handle_request_without_models_returns_empty_detections():
     )
     assert payload["detections"] == []
     assert model.calls == []
+
+
+def test_protocol_output_is_isolated_from_library_prints(monkeypatch):
+    """ライブラリの print が応答行に混ざらないこと
+
+    ultralytics は初回 import 時に設定ファイルの作成メッセージを標準出力へ
+    書く。1 行 = 1 応答の前提が崩れ、呼び出し側が JSON として解釈できずに
+    「初回だけ検出に失敗する」状態になっていた。
+    """
+    protocol = io.StringIO()
+    noise = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", protocol)
+    monkeypatch.setattr(sys, "stderr", noise)
+
+    worker_main.reserve_protocol_stdout()
+    print("Creating new Ultralytics Settings v0.0.6 file")  # ライブラリ相当の出力
+    worker_main._emit({"ok": True, "ready": True})
+
+    assert protocol.getvalue() == '{"ok": true, "ready": true}\n'
+    assert "Ultralytics" in noise.getvalue()

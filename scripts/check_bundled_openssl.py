@@ -19,7 +19,7 @@ from __future__ import annotations
 import ast
 import re
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from console_utf8 import use_utf8_output
 
@@ -41,16 +41,21 @@ def _iter_toc_entries(node):
         yield from _iter_toc_entries(child)
 
 
-def openssl_sources(toc_text: str) -> dict[str, dict[str, Path]]:
-    """{系統: {種別: 取得元パス}} を返す(系統は "-3-x64.dll" など)"""
-    found: dict[str, dict[str, Path]] = {}
+def openssl_sources(toc_text: str) -> dict[str, dict[str, PureWindowsPath]]:
+    """{系統: {種別: 取得元パス}} を返す(系統は "-3-x64.dll" など)
+
+    検証対象は必ず Windows ビルドの TOC なので、パスの解釈も Windows 固定にする
+    (POSIX 上で Path を使うと "C:\\a\\b.dll" が 1 つの名前として扱われ、
+    取得元ディレクトリの比較が常に一致してしまう)。
+    """
+    found: dict[str, dict[str, PureWindowsPath]] = {}
     for dest, source, typecode in _iter_toc_entries(ast.literal_eval(toc_text)):
         if typecode != _BINARY_TYPECODE:
             continue
-        matched = _OPENSSL_NAME.match(Path(dest).name)
+        matched = _OPENSSL_NAME.match(PureWindowsPath(dest).name)
         if matched:
             kind, family = matched.group(1).lower(), matched.group(2).lower()
-            found.setdefault(family, {})[kind] = Path(source)
+            found.setdefault(family, {})[kind] = PureWindowsPath(source)
     return found
 
 
@@ -63,7 +68,8 @@ def qt_openssl_backends(toc_text: str) -> list[str]:
     return [
         dest
         for dest, _source, typecode in _iter_toc_entries(ast.literal_eval(toc_text))
-        if typecode == _BINARY_TYPECODE and _QT_OPENSSL_BACKEND in Path(dest).name.lower()
+        if typecode == _BINARY_TYPECODE
+        and _QT_OPENSSL_BACKEND in PureWindowsPath(dest).name.lower()
     ]
 
 

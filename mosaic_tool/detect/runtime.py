@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import shutil
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QProcess, Signal
@@ -27,11 +28,39 @@ def install_command(uv: Path, runtime: Path, use_gpu: bool) -> list[str]:
     """runtime/ の venv へ推論パッケージを入れるコマンド
 
     GPU 版は torch の配布元が PyPI ではないため、追加のインデックスを指定する。
+    macOS には CUDA ビルドが無く、通常の wheel が MPS に対応しているため付けない。
     """
     cmd = [str(uv), "pip", "install", "--python", str(runtime), *PACKAGES]
-    if use_gpu:
+    if use_gpu and sys.platform != "darwin":
         cmd += ["--extra-index-url", TORCH_CUDA_INDEX_URL]
     return cmd
+
+
+def supports_gpu_choice() -> bool:
+    """セットアップで CPU/GPU を選ばせるか(macOS は構成が 1 通りしかない)"""
+    return sys.platform != "darwin"
+
+
+def resolve_device(setting: str) -> str:
+    """設定値をワーカーへ渡す device 文字列へ解決する
+
+    macOS は ultralytics の自動選択が MPS を選ばないため明示する。
+    Windows は空文字を渡して自動選択に任せる。
+    """
+    if setting == "cpu":
+        return "cpu"
+    return "mps" if sys.platform == "darwin" else ""
+
+
+def ensure_uv_executable(uv: Path) -> None:
+    """同梱した uv に実行ビットを付け直す
+
+    PyInstaller の --add-data はパーミッションを保持しないため、POSIX では
+    そのままでは起動できない。
+    """
+    if sys.platform == "win32":
+        return
+    uv.chmod(uv.stat().st_mode | 0o111)
 
 
 def has_nvidia_gpu() -> bool:
@@ -57,6 +86,13 @@ class RuntimeInstaller(QObject):
             self.finished.emit(False, f"uv が見つかりません: {uv}")
             return
         runtime_dir = paths.runtime_dir()
+        try:
+            ensure_uv_executable(uv)
+            # macOS では Application Support 配下がまだ存在しないことがある
+            runtime_dir.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            self.finished.emit(False, f"推論環境の準備に失敗しました: {e}")
+            return
         self._cancelled = False
         self._steps = [
             venv_command(uv, runtime_dir),

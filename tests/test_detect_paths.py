@@ -10,10 +10,47 @@ def test_base_dir_is_repo_root_when_not_frozen(monkeypatch):
     assert (paths.base_dir() / "mosaic_tool").is_dir()
 
 
-def test_base_dir_is_exe_dir_when_frozen(monkeypatch, tmp_path):
+def test_base_dir_is_exe_dir_when_frozen_on_windows(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(sys, "executable", str(tmp_path / "MosaicTool.exe"))
     assert paths.base_dir() == tmp_path
+
+
+def test_base_dir_is_application_support_when_frozen_on_macos(monkeypatch, tmp_path):
+    # .app を /Applications へ移しても書ける場所に置く
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(paths.Path, "home", staticmethod(lambda: tmp_path))
+    assert paths.base_dir() == (
+        tmp_path / "Library" / "Application Support" / "MosaicTool"
+    )
+
+
+def test_base_dir_is_repo_root_when_not_frozen_on_macos(monkeypatch):
+    # ソース実行時は OS を問わずリポジトリ直下
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert (paths.base_dir() / "mosaic_tool").is_dir()
+
+
+def test_venv_python_is_under_scripts_on_windows(monkeypatch, tmp_path):
+    monkeypatch.setattr(paths, "base_dir", lambda: tmp_path)
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert paths.venv_python() == tmp_path / "runtime" / "Scripts" / "python.exe"
+
+
+def test_venv_python_is_under_bin_on_macos(monkeypatch, tmp_path):
+    monkeypatch.setattr(paths, "base_dir", lambda: tmp_path)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert paths.venv_python() == tmp_path / "runtime" / "bin" / "python"
+
+
+def test_uv_exe_name_differs_by_os(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert paths.uv_exe_name() == "uv.exe"
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert paths.uv_exe_name() == "uv"
 
 
 def test_models_and_runtime_are_next_to_base(monkeypatch, tmp_path):
@@ -44,9 +81,9 @@ def test_runtime_is_not_ready_without_venv_python(monkeypatch, tmp_path):
 
 def test_runtime_is_ready_when_venv_python_exists(monkeypatch, tmp_path):
     monkeypatch.setattr(paths, "base_dir", lambda: tmp_path)
-    scripts = tmp_path / "runtime" / "Scripts"
-    scripts.mkdir(parents=True)
-    (scripts / "python.exe").write_bytes(b"")
+    python = paths.venv_python()
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"")
     assert paths.is_runtime_ready()
 
 
@@ -64,6 +101,7 @@ def test_worker_script_is_installed_into_runtime(monkeypatch, tmp_path):
 def test_bundled_resources_come_from_meipass_when_frozen(monkeypatch, tmp_path):
     # PyInstaller は展開先を sys._MEIPASS で知らせる(__file__ は実在しない)
     monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
     assert paths.bundled_uv_path() == tmp_path / "uv.exe"
     assert (

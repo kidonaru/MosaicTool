@@ -2,8 +2,13 @@
 import os
 
 import pytest
-from PySide6.QtCore import QEvent, QPointF, QRectF, Qt
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
+from PySide6.QtGui import (
+    QMouseEvent,
+    QNativeGestureEvent,
+    QPointingDevice,
+    QWheelEvent,
+)
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication  # noqa: E402
@@ -184,3 +189,81 @@ def test_press_outside_image_does_not_start_creation(qapp, mode, attr):
     canvas.set_mode(mode)
     _press(canvas, QPointF(-30, -30))
     assert not getattr(canvas, attr)
+
+
+def _wheel(pixel_delta: QPoint, angle_delta: QPoint, modifiers=Qt.KeyboardModifier.NoModifier):
+    return QWheelEvent(
+        QPointF(50, 50),
+        QPointF(50, 50),
+        pixel_delta,
+        angle_delta,
+        Qt.MouseButton.NoButton,
+        modifiers,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
+
+
+def _zoomed_canvas(qapp) -> MosaicCanvas:
+    """スクロールバーが動く状態(画像がビューポートより大きい)のキャンバス"""
+    canvas = _canvas_with_image(qapp)
+    canvas.resize(100, 100)
+    canvas._zoom_at(4.0, QPointF(50, 50))
+    return canvas
+
+
+def test_mouse_wheel_zooms(qapp):
+    # ピクセル delta を持たない通常のホイールは従来どおりズーム
+    canvas = _zoomed_canvas(qapp)
+    before = canvas.transform().m11()
+    canvas.wheelEvent(_wheel(QPoint(0, 0), QPoint(0, 120)))
+    assert canvas.transform().m11() > before
+
+
+def test_trackpad_scroll_slides_image_without_zoom(qapp):
+    # トラックパッドの 2 本指スクロールは拡縮せず画像をスライドさせる
+    canvas = _zoomed_canvas(qapp)
+    before = canvas.transform().m11()
+    vbar = canvas.verticalScrollBar()
+    start = vbar.value()
+    canvas.wheelEvent(_wheel(QPoint(0, -30), QPoint(0, -120)))
+    assert canvas.transform().m11() == before
+    assert vbar.value() != start
+
+
+def test_trackpad_scroll_with_modifier_zooms(qapp):
+    # 修飾キー併用時はトラックパッドでもズーム(ピンチが使えない環境の代替)
+    canvas = _zoomed_canvas(qapp)
+    before = canvas.transform().m11()
+    canvas.wheelEvent(
+        _wheel(QPoint(0, 30), QPoint(0, 120), Qt.KeyboardModifier.ControlModifier)
+    )
+    assert canvas.transform().m11() > before
+
+
+def _pinch(canvas: MosaicCanvas, value: float) -> None:
+    ev = QNativeGestureEvent(
+        Qt.NativeGestureType.ZoomNativeGesture,
+        QPointingDevice(),
+        2,
+        QPointF(50, 50),
+        QPointF(50, 50),
+        QPointF(50, 50),
+        value,
+        QPointF(0, 0),
+    )
+    canvas.viewportEvent(ev)
+
+
+def test_pinch_out_zooms_in(qapp):
+    canvas = _zoomed_canvas(qapp)
+    before = canvas.transform().m11()
+    _pinch(canvas, 0.2)
+    assert canvas.transform().m11() > before
+
+
+def test_pinch_in_zooms_out(qapp):
+    canvas = _zoomed_canvas(qapp)
+    before = canvas.transform().m11()
+    _pinch(canvas, -0.2)
+    assert canvas.transform().m11() < before

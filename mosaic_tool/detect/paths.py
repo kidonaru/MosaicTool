@@ -1,48 +1,49 @@
 """自動検出まわりのパス解決
 
-models/ と runtime/ は exe と同じ場所に置く(展開したフォルダごと持ち運べるように)。
-同梱リソース(uv.exe, worker_main.py)は onefile では展開先の一時ディレクトリに
-現れるため、基準が別になる。
+models/ と runtime/ を置く場所は OS で異なる。
+Windows は実行ファイルの隣(展開したフォルダごと持ち運べるように)、
+macOS は .app を /Applications へ移しても書ける Application Support 配下。
+同梱リソース(uv, worker_main.py)は PyInstaller の展開先が基準になる。
 """
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
+from mosaic_tool.bundle import bundle_dir, repo_root
+from mosaic_tool.version import APP_NAME
+
 MODELS_DIR_NAME = "models"
 RUNTIME_DIR_NAME = "runtime"
 MODEL_SUFFIX = ".pt"
-# runtime\ へコピーするワーカーのファイル名(venv の Python へ渡すため実体が要る)
+# runtime/ へコピーするワーカーのファイル名(venv の Python へ渡すため実体が要る)
 WORKER_SCRIPT_NAME = "detect_worker.py"
-UV_EXE_NAME = "uv.exe"
 
 
-def _repo_root() -> Path:
-    """ソース実行時のリポジトリ直下(このファイルは mosaic_tool/detect/ にある)"""
-    return Path(__file__).resolve().parents[2]
+def _is_windows() -> bool:
+    return sys.platform == "win32"
+
+
+def user_data_dir() -> Path:
+    """macOS でユーザーデータを置く場所(.app の中を汚さない)"""
+    return Path.home() / "Library" / "Application Support" / APP_NAME
+
+
+def uv_exe_name() -> str:
+    return "uv.exe" if _is_windows() else "uv"
 
 
 def base_dir() -> Path:
     """models/ runtime/ を置く基準ディレクトリ
 
-    frozen(PyInstaller)では exe と同じ場所、ソース実行ではリポジトリ直下。
+    frozen(PyInstaller)では Windows が実行ファイルの隣、macOS が
+    Application Support 配下。ソース実行ではどちらもリポジトリ直下。
     """
     if getattr(sys, "frozen", False):
+        if sys.platform == "darwin":
+            return user_data_dir()
         return Path(sys.executable).resolve().parent
-    return _repo_root()
-
-
-def _bundle_dir() -> Path:
-    """同梱リソースの基準
-
-    PyInstaller は展開先を sys._MEIPASS で知らせる(onefile なら一時ディレクトリ、
-    onedir なら _internal)。パッケージ本体は PYZ に取り込まれ __file__ が実在
-    しないため、同梱物の探索には必ずこちらを使う。
-    """
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        return Path(meipass)
-    return _repo_root()
+    return repo_root()
 
 
 def models_dir() -> Path:
@@ -62,7 +63,10 @@ def model_files() -> list[Path]:
 
 
 def venv_python() -> Path:
-    return runtime_dir() / "Scripts" / "python.exe"
+    """venv の Python(レイアウトが OS で異なる)"""
+    if _is_windows():
+        return runtime_dir() / "Scripts" / "python.exe"
+    return runtime_dir() / "bin" / "python"
 
 
 def is_runtime_ready() -> bool:
@@ -71,12 +75,12 @@ def is_runtime_ready() -> bool:
 
 
 def bundled_uv_path() -> Path:
-    return _bundle_dir() / UV_EXE_NAME
+    return bundle_dir() / uv_exe_name()
 
 
 def worker_script_source() -> Path:
     """同梱されたワーカー本体(.py の実体。PYZ 内のモジュールでは代用できない)"""
-    return _bundle_dir() / "mosaic_tool" / "detect" / "worker_main.py"
+    return bundle_dir() / "mosaic_tool" / "detect" / "worker_main.py"
 
 
 def worker_script_installed() -> Path:
