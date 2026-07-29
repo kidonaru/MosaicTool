@@ -18,6 +18,7 @@ from pathlib import Path
 import appinfo
 import build
 import macos_sign
+from console_utf8 import use_utf8_output
 
 PLATFORM_TAGS = {"win32": "win-x64", "darwin": "mac-arm64"}
 
@@ -78,6 +79,8 @@ def make_zip(stage_root: Path, stage_dir: Path, zip_path: Path) -> None:
 
 
 def main() -> None:
+    # CI (Windows ランナー) の標準出力は cp1252 で、日本語のまま出すと落ちる
+    use_utf8_output()
     parser = argparse.ArgumentParser(description="配布用 zip を作成する")
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--clean", action="store_true")

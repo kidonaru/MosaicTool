@@ -22,6 +22,7 @@ from pathlib import Path
 import appinfo
 import macos_bundle
 import macos_sign
+from console_utf8 import use_utf8_output
 
 UV_ASSETS = {
     "win32": "uv-x86_64-pc-windows-msvc.zip",
@@ -31,6 +32,10 @@ UV_ASSETS = {
 
 def is_macos() -> bool:
     return sys.platform == "darwin"
+
+
+def scripts_dir() -> Path:
+    return Path(__file__).resolve().parent
 
 
 def uv_asset_name() -> str:
@@ -99,14 +104,18 @@ def _data_arg(source: Path, destination: str) -> str:
     return f"{source}{os.pathsep}{destination}"
 
 
-def pyinstaller_args(app_name: str, one_dir: bool) -> list[str]:
+def makespec_args(app_name: str, one_dir: bool) -> list[str]:
+    """.spec を生成するコマンド
+
+    .spec は一度生成してから編集する(Windows では Qt の OpenSSL バックエンドを
+    外すため)。ビルド用の --noconfirm / --clean は makespec が受け付けないので、
+    build_args() 側で渡す。
+    """
     root = appinfo.repo_root()
     # macOS は .app バンドルを作るため常に onedir
     mode = "--onedir" if (one_dir or is_macos()) else "--onefile"
     args = [
-        "-m", "PyInstaller",
-        "--noconfirm",
-        "--clean",
+        "-m", "PyInstaller.utils.cliutils.makespec",
         mode,
         "--windowed",              # コンソールウィンドウを出さない
         "--name", app_name,
@@ -127,6 +136,20 @@ def pyinstaller_args(app_name: str, one_dir: bool) -> list[str]:
     return args
 
 
+def spec_path(app_name: str) -> Path:
+    # makespec_args() が --specpath build を渡すため build/ 直下に出る
+    return appinfo.repo_root() / "build" / f"{app_name}.spec"
+
+
+def build_args(spec: Path) -> list[str]:
+    return ["-m", "PyInstaller", "--noconfirm", "--clean", str(spec)]
+
+
+def toc_path(app_name: str) -> Path:
+    """同梱物の一覧。ビルド後の OpenSSL 検証に使う"""
+    return appinfo.repo_root() / "build" / app_name / "EXE-00.toc"
+
+
 def built_app_path(app_name: str, one_dir: bool) -> Path:
     dist = appinfo.repo_root() / "dist"
     if is_macos():
@@ -143,6 +166,8 @@ def _run_python(python: str, args: list[str]) -> None:
 
 
 def main() -> None:
+    # CI (Windows ランナー) の標準出力は cp1252 で、日本語のまま出すと落ちる
+    use_utf8_output()
     parser = argparse.ArgumentParser(description="実行ファイルをビルドする")
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--onedir", action="store_true")
@@ -165,11 +190,35 @@ def main() -> None:
     _run_python(args.python, ["-m", "pip", "install", "pyinstaller"])
 
     fetch_uv(args.uv_version)
-    _run_python(args.python, pyinstaller_args(app_name, args.onedir))
+    _run_python(args.python, makespec_args(app_name, args.onedir))
+
+    spec = spec_path(app_name)
+    if not spec.is_file():
+        appinfo.fail(f"spec が生成されませんでした: {spec}")
+
+    if sys.platform == "win32":
+        # Qt の OpenSSL バックエンドは System32 の OpenSSL を引き込み、同梱版と
+        # 混在してプロセスごと落ちる。macOS では SecureTransport を使うため不要
+        print("-- Qt の OpenSSL バックエンドを除外します")
+        _run_python(args.python, [str(scripts_dir() / "exclude_openssl_backend.py"), str(spec)])
+
+    _run_python(args.python, build_args(spec))
 
     output = built_app_path(app_name, args.onedir)
     if not output.exists():
         appinfo.fail(f"ビルドは完了しましたが実行ファイルが見つかりません: {output}")
+
+    if sys.platform == "win32":
+        # libssl と libcrypto が別ディレクトリから拾われると実行時に落ちる
+        toc = toc_path(app_name)
+        if not toc.is_file():
+            # 検証を黙って飛ばすと壊れた exe をそのまま配布してしまうため、ここで止める
+            appinfo.fail(
+                "TOC が見つからず OpenSSL を検証できません"
+                f" (PyInstaller の出力形式が変わった可能性): {toc}"
+            )
+        print("-- 同梱された OpenSSL を検証します")
+        _run_python(args.python, [str(scripts_dir() / "check_bundled_openssl.py"), str(toc)])
 
     if is_macos():
         # 署名の前に行う(署名後に書き換えると署名が壊れる)
