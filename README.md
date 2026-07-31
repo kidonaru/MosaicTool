@@ -136,6 +136,8 @@ NSFW 向けのモデルは自動ダウンロードの対象外です。以下の
 動画ファイル (mp4 / mov / mkv / webm 等) をドロップすると動画モードになり、
 静止画と同じ操作でモザイク範囲を編集できます。
 
+https://github.com/user-attachments/assets/9ac0707a-f8ad-47da-8e66-b4fd2d3c5606
+
 初回は変換用の実行環境 (ffmpeg) のセットアップを促されます。
 
 - 取得するもの: 静的ビルド (Windows 約 110MB / macOS 約 50MB)。取得内容は SHA-256 で検証されます
