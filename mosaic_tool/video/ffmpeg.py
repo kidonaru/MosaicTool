@@ -7,6 +7,7 @@ runtime/ とは分ける(理由は ffmpeg_dir を参照)。
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -28,9 +29,24 @@ EXPORT_SHORT_SIDES = (1080, 720, 480)  # 解像度プリセット (短辺上限 
 EXPORT_CRF_RANGES = {"h264": (14, 28), "h265": (18, 32)}  # (高品質, 低容量)
 EXPORT_CRF_DEFAULTS = {"h264": 18, "h265": 22}  # h264 の 18 は従来の書き出し品質
 
+# 選べる書き出しコーデック。rawvideo は無圧縮(CRF を持たない)
+EXPORT_CODECS = ("h264", "h265", "rawvideo")
+DEFAULT_CONTAINER = ".mp4"
+# 無圧縮の rawvideo は mp4 に収められないため AVI で出す
+CONTAINER_BY_CODEC = {"rawvideo": ".avi"}
+
+# 無圧縮の見積もりに乗せる余裕。映像の生サイズに加えてコンテナのインデックスと
+# PCM 音声が載るため、その分を割り増しておく
+LOSSLESS_SIZE_MARGIN = 1.05
+
 # 再生プレビューの横幅上限 (px)。1080p 以下は原寸のまま再生し、4K などは
 # 縮めてパイプの帯域を抑える(4K 原寸の rawvideo はデコードが実時間に届かない)
 PROXY_MAX_WIDTH = 1920
+
+# シークバーのホバープレビュー用サムネイル。全編を THUMBNAIL_COUNT 分割した
+# 代表フレームを事前に取り出しておき、ホバー時は最寄りを出すだけにする
+THUMBNAIL_COUNT = 100
+THUMBNAIL_MAX_WIDTH = 160
 
 # probe は読むだけなので短め、フレーム抽出は後方フレームへのシークを見込んで長め (秒)
 PROBE_TIMEOUT = 60
@@ -41,9 +57,19 @@ def is_video_file(path: Path) -> bool:
     return path.suffix.lower() in VIDEO_EXTS
 
 
-def mc_video_path(src: Path) -> Path:
-    """動画の保存先: 同じ場所の 名前_mc.mp4(出力コンテナは mp4 に統一)"""
-    return src.with_name(f"{src.stem}_mc.mp4")
+def container_suffix(codec: str) -> str:
+    """コーデックを収める出力コンテナの拡張子(既定は mp4)"""
+    return CONTAINER_BY_CODEC.get(codec, DEFAULT_CONTAINER)
+
+
+def is_lossless(codec: str) -> bool:
+    """CRF による品質指定を持たない無圧縮コーデックか"""
+    return codec == "rawvideo"
+
+
+def mc_video_path(src: Path, codec: str = "h264") -> Path:
+    """動画の保存先: 同じ場所の 名前_mc.<コンテナ拡張子>"""
+    return src.with_name(f"{src.stem}_mc{container_suffix(codec)}")
 
 
 def _is_windows() -> bool:
@@ -100,9 +126,9 @@ class VideoInfo:
 class ExportSettings:
     """書き出しダイアログで選ぶ設定。既定値は従来の書き出し (H.264 / CRF 18 / 元サイズ)"""
 
-    codec: str = "h264"                # "h264" | "h265"
+    codec: str = "h264"                # EXPORT_CODECS のいずれか
     max_short_side: int | None = None  # 短辺の上限 px。None は元のサイズ
-    crf: int = EXPORT_CRF_DEFAULTS["h264"]  # 小さいほど高品質
+    crf: int = EXPORT_CRF_DEFAULTS["h264"]  # 小さいほど高品質(rawvideo では未使用)
 
 
 def crf_range(codec: str) -> tuple[int, int]:
@@ -130,6 +156,35 @@ def export_size(info: VideoInfo, max_short_side: int | None) -> tuple[int, int]:
         width = round(info.width * max_short_side / short)
         height = round(info.height * max_short_side / short)
     return max(2, width - width % 2), max(2, height - height % 2)
+
+
+def estimated_output_bytes(info: VideoInfo, export: ExportSettings) -> int | None:
+    """書き出しサイズの概算 (bytes)。見積もれないコーデックは None
+
+    無圧縮は「幅 × 高さ × 3 バイト × フレーム数」で決まるため事前に読める。
+    圧縮コーデックは中身次第で何倍も変わるため、当てにならない数字は出さない。
+    """
+    if not is_lossless(export.codec):
+        return None
+    width, height = export_size(info, export.max_short_side)
+    raw = width * height * 3 * info.frame_count
+    return int(raw * LOSSLESS_SIZE_MARGIN)
+
+
+def free_bytes(dest: Path) -> int | None:
+    """保存先ドライブの空き容量 (bytes)。取得できなければ None"""
+    try:
+        return shutil.disk_usage(dest.parent).free
+    except OSError:
+        return None
+
+
+def format_size(size: int) -> str:
+    """バイト数を GB / MB の読みやすい表記にする"""
+    gb = size / 1024 ** 3
+    if gb >= 1:
+        return f"{gb:.1f} GB"
+    return f"{size / 1024 ** 2:.0f} MB"
 
 
 class VideoError(Exception):
@@ -264,6 +319,32 @@ def proxy_size(info: VideoInfo, max_width: int = PROXY_MAX_WIDTH) -> tuple[int, 
     return max(2, width - width % 2), max(2, height - height % 2)
 
 
+def thumbnail_step(frame_count: int, count: int = THUMBNAIL_COUNT) -> int:
+    """サムネイルの間隔(フレーム数)。全編を count 分割し、短い動画は全フレーム"""
+    return max(1, frame_count // count)
+
+
+def thumbnails_command(
+    src: Path, info: VideoInfo, step: int, size: tuple[int, int]
+) -> list[str]:
+    """step フレームおきのサムネイルを rawvideo (RGB24) として標準出力へ流すコマンド
+
+    1 パスで全編から取り出す。1 フレームは幅 × 高さ × 3 バイト固定なので、
+    読み出し側は k 枚目をフレーム k * step に対応付けるだけでよい。
+    """
+    filters = _fps_filter(info)
+    if step > 1:
+        filters += f",select='not(mod(n\\,{step}))'"
+    width, height = size
+    filters += f",scale={width}:{height}"
+    return [
+        str(ffmpeg_path()), "-v", "error",
+        "-i", str(src),
+        "-vf", filters, "-fps_mode", "vfr",
+        "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+    ]
+
+
 def playback_command(
     src: Path, info: VideoInfo, start: int, size: tuple[int, int]
 ) -> list[str]:
@@ -304,26 +385,34 @@ def encode_command(
     ]
     if info.audio_codec is not None:
         cmd += ["-map", "1:a"]
-    codec = "libx265" if export.codec == "h265" else "libx264"
     width, height = export_size(info, export.max_short_side)
-    cmd += [
-        "-c:v", codec, "-pix_fmt", "yuv420p",
-        "-crf", str(export.crf),
-        "-vf", f"scale={width}:{height}",
-    ]
+    lossless = is_lossless(export.codec)
+    if lossless:
+        # 無圧縮 (AVI)。入力の RGB をそのまま格納するため CRF は使わない
+        cmd += ["-c:v", "rawvideo", "-pix_fmt", "bgr24"]
+    else:
+        encoder = "libx265" if export.codec == "h265" else "libx264"
+        cmd += ["-c:v", encoder, "-pix_fmt", "yuv420p", "-crf", str(export.crf)]
+    cmd += ["-vf", f"scale={width}:{height}"]
     if export.codec == "h265":
         # hvc1: Apple 系プレイヤーで再生できるようにするタグ。
         # preset fast: x265 の既定 (medium) は極端に遅く、エンコーダ待ちの
         # タイムアウト(exporter.ENCODER_WAIT)に届きうるため速度優先にする
         cmd += ["-tag:v", "hvc1", "-preset", "fast"]
     if info.audio_codec is not None:
-        if info.audio_codec in MP4_COPY_AUDIO:
+        if lossless:
+            # AVI は AAC を収めにくいため、音声も無圧縮の PCM にする
+            cmd += ["-c:a", "pcm_s16le"]
+        elif info.audio_codec in MP4_COPY_AUDIO:
             cmd += ["-c:a", "copy"]
         else:
             cmd += ["-c:a", "aac", "-b:a", "192k"]
     # 既定でもグローバルメタデータは 2 入力目から引き継がれないため明示する
     cmd += ["-map_metadata", "-1" if strip_meta else "1"]
-    cmd += ["-movflags", "+faststart", str(dest)]
+    if not lossless:
+        # faststart は mp4 コンテナ専用のオプション
+        cmd += ["-movflags", "+faststart"]
+    cmd.append(str(dest))
     return cmd
 
 

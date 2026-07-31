@@ -352,6 +352,19 @@ class TestRows:
         area.set_data([vr(0, 10)])
         assert area.sizeHint().height() < h2
 
+    def test_height_fills_viewport(self):
+        """行が少なくてもビューポートの高さまで広がる(下端まで背景を描くため)"""
+        area = make_area()
+        area.set_data([vr(0, 10)])
+        area.set_viewport_height(400)
+        assert area.sizeHint().height() == 400
+
+    def test_height_follows_rows_when_taller_than_viewport(self):
+        area = make_area()
+        area.set_viewport_height(40)
+        area.set_data([vr(0, 10), vr(5, 15), vr(6, 16)])
+        assert area.sizeHint().height() > 40
+
 
 class TestWindow:
     def test_window_flag_and_title(self):

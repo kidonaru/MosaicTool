@@ -64,6 +64,46 @@ class TestCrfSlider:
         assert d._crf.value() == 15
 
 
+class TestLosslessCodec:
+    def test_rawvideo_is_offered(self, tmp_path):
+        d = make_dialog(tmp_path)
+        values = [d._codec.itemData(i) for i in range(d._codec.count())]
+        assert values == ["h264", "h265", "rawvideo"]
+
+    def test_quality_row_is_hidden_for_rawvideo(self, tmp_path):
+        d = make_dialog(tmp_path)
+        d._codec.setCurrentIndex(d._codec.findData("rawvideo"))
+        assert not d._crf_caption.isVisibleTo(d)
+        assert not d._crf.isVisibleTo(d)
+        # 圧縮コーデックへ戻せば品質行も戻る
+        d._codec.setCurrentIndex(d._codec.findData("h264"))
+        assert d._crf_caption.isVisibleTo(d)
+
+    def test_rawvideo_settings_carry_the_default_crf(self, tmp_path):
+        # CRF は使わないため、スライダーの残り値ではなく既定値を入れる
+        d = make_dialog(tmp_path)
+        d._crf.setValue(15)
+        d._codec.setCurrentIndex(d._codec.findData("rawvideo"))
+        result = d.export_settings()
+        assert result.codec == "rawvideo"
+        assert result.crf == ffmpeg.crf_default("rawvideo")
+
+    def test_accept_keeps_the_crf_of_compressed_codecs(self, tmp_path):
+        s = _settings(tmp_path)
+        d = make_dialog(tmp_path, settings=s)
+        d._crf.setValue(15)
+        d._codec.setCurrentIndex(d._codec.findData("rawvideo"))
+        d.accept()
+        assert s.video_codec() == "rawvideo"
+        assert s.video_crf("h264") == 15
+
+    def test_saved_rawvideo_choice_is_restored(self, tmp_path):
+        s = _settings(tmp_path)
+        s.set_video_codec("rawvideo")
+        d = make_dialog(tmp_path, settings=s)
+        assert d.export_settings().codec == "rawvideo"
+
+
 class TestResolutionPresets:
     def test_hides_presets_at_or_above_the_short_side(self, tmp_path):
         # 1920x1080 (短辺 1080) では 1080p は無意味なので出さない

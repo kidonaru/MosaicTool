@@ -1,9 +1,9 @@
 """動画モードのタイムラインウィンドウ(カテゴリ別の行と区間バー)"""
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLabel, QScrollArea, QVBoxLayout, QWidget
 
 from mosaic_tool.regions import Region
 from mosaic_tool.video.lanes import (
@@ -48,6 +48,18 @@ HANDLE_PX = 5
 # ラバーバンド(矩形選択)を表す _drag の種類
 RUBBER = "rubber"
 
+# 右下に重ねるキーガイドの本文と、ビューポート端からの余白 (px)
+KEY_GUIDE_LINES = (
+    "Space: 再生 / 一時停止",
+    "← / →: 1 フレーム移動",
+    "ホイール: 横スクロール",
+    "Shift + ホイール: 縦スクロール",
+    "Ctrl + ホイール: 拡大 / 縮小",
+    "ドラッグ: 区間の移動(端で伸縮)",
+    "Delete: 選択中の区間を削除",
+)
+KEY_GUIDE_MARGIN = 8
+
 # バー端の縁取りの幅 (px)。選択中は太くして掴める位置を示す
 BAR_EDGE_W = 1
 SELECTED_EDGE_W = 2
@@ -76,6 +88,8 @@ _RUBBER_LINE = QColor(0xCC, 0xDD, 0xFF)    # 矩形選択の枠線
 _PLAYHEAD_COLOR = QColor(0xFF, 0x50, 0x50)
 _GRID_MAJOR = QColor(0x3C, 0x3C, 0x3C)  # 主目盛りの縦線
 _GRID_MINOR = QColor(0x33, 0x33, 0x33)  # 副目盛りの縦線
+_GUIDE_BG = QColor(0x18, 0x18, 0x18, 0xC8)  # キーガイドの下地(下のバーが薄く透ける)
+_GUIDE_TEXT = QColor(0x9E, 0x9E, 0x9E)      # キーガイドの文字(主役より沈める)
 
 
 def _tick_interval(px_per_frame: float) -> int:
@@ -115,11 +129,12 @@ class TimelineArea(QWidget):
     scroll_requested = Signal(int)            # ズーム時のアンカー補正スクロール量
     hscroll_requested = Signal(int)           # ホイールによる横スクロール量(相対 px)
     playback_toggle_requested = Signal()      # Space による再生/一時停止の要求
+    step_requested = Signal(int)              # ←/→ によるコマ送り(相対フレーム数)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        # キーで削除できるようクリックでフォーカスを受け取る
-        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        # ←/→ や Space をこのウィジェットで受けるため、常にフォーカスを持てるようにする
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         # ボタンを押していない移動でもカーソル形状を切り替えるため必要
         self.setMouseTracking(True)
         self._total = 0
@@ -130,6 +145,7 @@ class TimelineArea(QWidget):
         self._selection = TimelineSelection()
         self._px_per_frame = 2.0
         self._scroll_x = 0  # ラベル列の固定表示に使う水平スクロール量
+        self._view_h = 0    # ビューポートの高さ(行が少なくてもここまで描く)
         # ("start" | "end" | "move" | "seek", 対象). seek は対象なし
         self._drag: tuple[str, VideoRegion | None] | None = None
         self._grab_offset = 0  # move ドラッグでつかんだ位置と開始フレームの差
@@ -183,6 +199,14 @@ class TimelineArea(QWidget):
         self._scroll_x = x
         self.update()
 
+    def set_viewport_height(self, height: int) -> None:
+        """ビューポートの高さを受け取り、行が足りなくてもそこまで背景を描く"""
+        height = max(0, height)
+        if height == self._view_h:
+            return
+        self._view_h = height
+        self._apply_size()
+
     # --- 座標変換とジオメトリ ---
 
     def _x(self, frame: int) -> float:
@@ -208,7 +232,8 @@ class TimelineArea(QWidget):
 
     def sizeHint(self) -> QSize:  # noqa: N802 (Qt のオーバーライド)
         width = LABEL_W + self._total * self._px_per_frame + TAIL_W
-        height = self._row_top(len(self._rows))
+        # 行が少なくてもビューポートを埋め、地の色や目盛りが下端まで続くようにする
+        height = max(self._row_top(len(self._rows)), self._view_h)
         return QSize(int(width), int(height))
 
     def _apply_size(self) -> None:
@@ -503,6 +528,12 @@ class TimelineArea(QWidget):
             self.playback_toggle_requested.emit()
             event.accept()
             return
+        # メインウィンドウと同じくコマ送りに割り当てる
+        # (受け取らないとスクロール領域の横スクロールとして消費される)
+        if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+            self.step_requested.emit(-1 if event.key() == Qt.Key.Key_Left else 1)
+            event.accept()
+            return
         if (
             event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace)
             and len(self._selection) > 0
@@ -586,9 +617,10 @@ class TimelineArea(QWidget):
 
         行背景の後・区間バーの前に描き、バーが線に埋もれないようにする。
         """
-        bottom = self._row_top(len(self._rows))
-        if bottom <= RULER_H + ROW_GAP:
+        if not self._rows:
             return
+        # 行の下にも縦線を伸ばし、行が少なくても下端まで時間軸が続いて見えるようにする
+        bottom = self.height()
         major = _tick_interval(self._px_per_frame)
         minor = _minor_interval(major, self._px_per_frame)
         first = max(0, self._frame_at(rect.left()) // minor * minor)
@@ -685,6 +717,41 @@ class TimelineArea(QWidget):
             )
 
 
+class KeyGuide(QLabel):
+    """操作キーの一覧をビューポート右下へ薄く重ねる札
+
+    タイムライン上の操作を邪魔しないよう、マウスイベントは下へ素通しする。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__("\n".join(KEY_GUIDE_LINES), parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        # 親(スクロール領域)のスタイルシートに飲まれないよう id で指定する
+        self.setObjectName("keyGuide")
+        background = (
+            f"rgba({_GUIDE_BG.red()}, {_GUIDE_BG.green()},"
+            f" {_GUIDE_BG.blue()}, {_GUIDE_BG.alpha()})"
+        )
+        self.setStyleSheet(
+            "QLabel#keyGuide {"
+            f" background: {background}; color: {_GUIDE_TEXT.name()};"
+            " border-radius: 4px; padding: 6px 8px; }"
+        )
+        self.adjustSize()
+
+    def reposition(self) -> None:
+        """親の右下へ寄せ直す(ビューポートのリサイズごとに呼ぶ)"""
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        self.adjustSize()
+        self.move(
+            parent.width() - self.width() - KEY_GUIDE_MARGIN,
+            parent.height() - self.height() - KEY_GUIDE_MARGIN,
+        )
+        self.raise_()
+
+
 class TimelineWindow(QWidget):
     """タイムラインウィンドウ本体。TimelineArea を横スクロール領域に載せる"""
 
@@ -694,6 +761,7 @@ class TimelineWindow(QWidget):
     delete_requested = Signal(list)
     selection_changed = Signal(list)
     playback_toggle_requested = Signal()
+    step_requested = Signal(int)
     closed = Signal()  # × で閉じられた(ツールバーのトグルを戻すため)
 
     def __init__(self, parent=None):
@@ -717,9 +785,17 @@ class TimelineWindow(QWidget):
         # sizeHint の幅(フレーム数 × px/フレーム)をそのまま使うため自動伸縮はしない
         self._scroll.setWidgetResizable(False)
         self._scroll.setWidget(self._area)
+        # ←/→ をスクロール領域に横スクロールとして食われないよう、
+        # キー入力は常に TimelineArea が受け取るようにする
+        self._scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._scroll.viewport().setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._guide = KeyGuide(self._scroll.viewport())
         self._scroll.horizontalScrollBar().valueChanged.connect(
             self._area.set_scroll_x
         )
+        # ビューポートの高さ変化(ウィンドウのリサイズや横スクロールバーの出入り)を
+        # 拾って、行が少なくても下端まで描かせる
+        self._scroll.viewport().installEventFilter(self)
         self._area.seek_requested.connect(self.seek_requested)
         self._area.intervals_edited.connect(self.intervals_edited)
         self._area.delete_requested.connect(self.delete_requested)
@@ -727,9 +803,22 @@ class TimelineWindow(QWidget):
         self._area.scroll_requested.connect(self._scroll_to)
         self._area.hscroll_requested.connect(self._scroll_by)
         self._area.playback_toggle_requested.connect(self.playback_toggle_requested)
+        self._area.step_requested.connect(self.step_requested)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._scroll)
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt のオーバーライド)
+        if obj is self._scroll.viewport() and event.type() == QEvent.Type.Resize:
+            self._area.set_viewport_height(event.size().height())
+            self._guide.reposition()
+        return super().eventFilter(obj, event)
+
+    def showEvent(self, event) -> None:  # noqa: N802 (Qt のオーバーライド)
+        """開いた直後からキー操作が効くよう、本体へフォーカスを渡す"""
+        super().showEvent(event)
+        self._area.setFocus()
+        self._guide.reposition()
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt のオーバーライド)
         self.closed.emit()
@@ -749,6 +838,9 @@ class TimelineWindow(QWidget):
 
     def set_data(self, regions: list[VideoRegion]) -> None:
         self._area.set_data(regions)
+        # 区間が並ぶとバーに重なって邪魔になるため、空のときだけ案内を出す
+        self._guide.setVisible(not regions)
+        self._guide.reposition()
 
     def set_selection(self, regions: list[Region]) -> None:
         self._area.set_selection(regions)

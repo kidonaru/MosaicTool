@@ -8,7 +8,12 @@ from __future__ import annotations
 from PySide6.QtCore import QByteArray, QSettings
 
 from mosaic_tool.version import APP_NAME
-from mosaic_tool.video.ffmpeg import EXPORT_SHORT_SIDES, crf_default, crf_range
+from mosaic_tool.video.ffmpeg import (
+    EXPORT_CODECS,
+    EXPORT_SHORT_SIDES,
+    crf_default,
+    crf_range,
+)
 
 ORG_NAME = APP_NAME
 
@@ -21,7 +26,7 @@ DEFAULT_STRIP_META = False  # メタ削除(既定は元画像のメタ情報を�
 DEFAULT_MODE = "pen"      # ツールモード ("pen" / "rect")
 DEFAULT_CONFIDENCE = 25   # 自動検出の信頼度しきい値 (%)
 DEFAULT_DEVICE = "auto"   # 推論デバイス ("auto" / "cpu")
-DEFAULT_VIDEO_CODEC = "h264"  # 動画書き出しコーデック ("h264" / "h265")
+DEFAULT_VIDEO_CODEC = "h264"  # 動画書き出しコーデック (EXPORT_CODECS のいずれか)
 DEFAULT_VIDEO_RESOLUTION = 0  # 動画書き出しの短辺上限 px (0 は元のサイズ)
 
 _KEY_BLOCK = "mosaic/block"
@@ -177,7 +182,7 @@ class AppSettings:
 
     def video_codec(self) -> str:
         value = str(self._qsettings.value(_KEY_VIDEO_CODEC, DEFAULT_VIDEO_CODEC))
-        return value if value in ("h264", "h265") else DEFAULT_VIDEO_CODEC
+        return value if value in EXPORT_CODECS else DEFAULT_VIDEO_CODEC
 
     def set_video_codec(self, value: str) -> None:
         self._qsettings.setValue(_KEY_VIDEO_CODEC, value)

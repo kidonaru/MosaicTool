@@ -111,6 +111,20 @@ class VideoSession:
         vr.start = min(vr.start, frame)
         return True
 
+    def clear_auto_regions(self, start: int, end: int) -> int:
+        """指定区間に掛かる自動検出由来の範囲を取り除き、取り除いた数を返す
+
+        検出をやり直したときに前回の結果が二重に残らないようにする。手描きの
+        ペン・矩形は対象外。区間が一部でも重なるものは丸ごと取り除く。
+        """
+        kept = [
+            vr for vr in self.regions
+            if vr.source is not RegionSource.AUTO or vr.end < start or vr.start > end
+        ]
+        removed = len(self.regions) - len(kept)
+        self.regions = kept
+        return removed
+
     def add_intervals(self, intervals: list[Interval]) -> int:
         """検出区間を範囲として追加し、追加数を返す
 

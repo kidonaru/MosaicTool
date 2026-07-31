@@ -8,10 +8,10 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 from mosaic_tool.video.timeline import TimelineBar  # noqa: E402
 
 
-def make_bar():
+def make_bar(fps=30.0):
     QApplication.instance() or QApplication([])
     bar = TimelineBar()
-    bar.set_range(100)
+    bar.set_range(100, fps)
     return bar
 
 
@@ -49,6 +49,19 @@ class TestSeek:
         assert bar.frame() == 42
 
 
+class TestTimeLabel:
+    def test_label_shows_the_time(self):
+        bar = make_bar()
+        bar.set_frame(45)
+        assert bar._time_label.text().split() == ["00:01.50", "/", "00:03.30"]
+
+    def test_label_without_fps_falls_back_to_zero(self):
+        # 動画を開く前は fps が無く、時刻は 00:00.00 のままにする
+        QApplication.instance() or QApplication([])
+        bar = TimelineBar()
+        assert "00:00.00 / 00:00.00" in bar._time_label.text()
+
+
 def test_interval_api_removed():
     # 区間の表示・編集はタイムラインウィンドウへ移した
     bar = make_bar()
@@ -68,15 +81,29 @@ class TestPlaybackControls:
         bar._play_btn.click()
         assert fired == [True]
 
-    def test_play_button_text_follows_the_state(self):
-        from mosaic_tool.video.timeline import PAUSE_TEXT, PLAY_TEXT
+    def test_play_button_icon_follows_the_state(self):
+        from mosaic_tool.video.timeline import PAUSE_ICON, PLAY_ICON
 
         bar = make_bar()
-        assert bar._play_btn.text() == PLAY_TEXT
+
+        def icon_image(pixmap):
+            return bar.style().standardIcon(pixmap).pixmap(16).toImage()
+
+        def shown():
+            return bar._play_btn.icon().pixmap(16).toImage()
+
+        assert not bar.is_playing()
+        assert shown() == icon_image(PLAY_ICON)
         bar.set_playing(True)
-        assert bar._play_btn.text() == PAUSE_TEXT
+        assert bar.is_playing()
+        assert shown() == icon_image(PAUSE_ICON)
         bar.set_playing(False)
-        assert bar._play_btn.text() == PLAY_TEXT
+        assert not bar.is_playing()
+        assert shown() == icon_image(PLAY_ICON)
+
+    def test_play_button_has_no_emoji_text(self):
+        # 絵文字字形で描かれて周りのボタンから浮くのを避ける
+        assert make_bar()._play_btn.text() == ""
 
     def test_play_button_does_not_take_focus(self):
         # Space のショートカットとボタンの押下が二重に効かないようにする
@@ -95,3 +122,78 @@ class TestPlaybackControls:
         bar._speed_combo.setCurrentIndex(0)
         assert bar.speed() == 0.25
         assert fired == [0.25]
+
+
+class TestSeekPreview:
+    def _image(self):
+        from PySide6.QtGui import QImage
+
+        image = QImage(4, 3, QImage.Format.Format_RGB888)
+        image.fill(0)
+        return image
+
+    def _hover(self, bar, x):
+        from PySide6.QtCore import QEvent, QPointF, Qt
+        from PySide6.QtGui import QMouseEvent
+
+        event = QMouseEvent(
+            QEvent.Type.MouseMove,
+            QPointF(x, 5),
+            QPointF(x, 5),
+            Qt.MouseButton.NoButton,
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(bar._slider, event)
+
+    def test_nearest_thumbnail_is_looked_up(self):
+        bar = make_bar()
+        for frame in (0, 30, 60):
+            bar.add_thumbnail(frame, self._image())
+        assert bar._nearest_thumb_frame(40) == 30
+        assert bar._nearest_thumb_frame(50) == 60
+
+    def test_no_thumbnails_returns_none(self):
+        bar = make_bar()
+        assert bar._nearest_thumb_frame(40) is None
+
+    def test_hover_shows_the_preview(self):
+        bar = make_bar()
+        bar._slider.resize(200, 20)
+        bar.add_thumbnail(50, self._image())
+        self._hover(bar, 100)
+        assert bar._preview.isVisible()
+        assert not bar._preview.image.pixmap().isNull()
+
+    def test_preview_caption_shows_the_frame_and_time(self):
+        bar = make_bar()
+        bar._slider.resize(200, 20)
+        bar.add_thumbnail(50, self._image())
+        self._hover(bar, 100)
+        # 200px の中央 = 50 フレーム目 (30fps なので 00:01.67)
+        assert bar._preview.caption.text() == "50  00:01.67"
+
+    def test_hover_without_thumbnails_shows_nothing(self):
+        bar = make_bar()
+        bar._slider.resize(200, 20)
+        self._hover(bar, 100)
+        assert not bar._preview.isVisible()
+
+    def test_leave_hides_the_preview(self):
+        from PySide6.QtCore import QEvent
+
+        bar = make_bar()
+        bar._slider.resize(200, 20)
+        bar.add_thumbnail(50, self._image())
+        self._hover(bar, 100)
+        QApplication.sendEvent(bar._slider, QEvent(QEvent.Type.Leave))
+        assert not bar._preview.isVisible()
+
+    def test_clear_thumbnails_hides_the_preview(self):
+        bar = make_bar()
+        bar._slider.resize(200, 20)
+        bar.add_thumbnail(50, self._image())
+        self._hover(bar, 100)
+        bar.clear_thumbnails()
+        assert not bar._preview.isVisible()
+        assert bar._nearest_thumb_frame(50) is None

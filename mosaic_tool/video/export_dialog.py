@@ -18,7 +18,11 @@ from mosaic_tool.video import ffmpeg
 from mosaic_tool.video.ffmpeg import ExportSettings, VideoInfo
 
 # コーデックの表示名。互換性と圧縮率のトレードオフを一言で添える
-_CODECS = (("H.264 (互換性重視)", "h264"), ("H.265 (高圧縮)", "h265"))
+_CODECS = (
+    ("H.264 (互換性重視)", "h264"),
+    ("H.265 (高圧縮)", "h265"),
+    ("無圧縮 AVI (最高画質・巨大)", "rawvideo"),
+)
 
 
 class ExportDialog(QDialog):
@@ -38,8 +42,11 @@ class ExportDialog(QDialog):
         index = self._codec.findData(settings.video_codec())
         self._codec.setCurrentIndex(max(0, index))
         # CRF はコーデックごとに保持し、切り替えでレンジと値を入れ替える
+        # (無圧縮は品質を選べないため持たない)
         self._crf_by_codec = {
-            value: settings.video_crf(value) for _, value in _CODECS
+            value: settings.video_crf(value)
+            for _, value in _CODECS
+            if not ffmpeg.is_lossless(value)
         }
         self._codec.currentIndexChanged.connect(self._on_codec_changed)
 
@@ -59,7 +66,7 @@ class ExportDialog(QDialog):
         # スライダーの値は CRF そのもの(左=小さい値=高品質)
         self._crf = QSlider(Qt.Orientation.Horizontal)
         self._crf_label = QLabel()
-        self._apply_codec_crf()
+        self._crf_caption = QLabel("品質")
         self._crf.valueChanged.connect(self._update_crf_label)
         crf_row = QHBoxLayout()
         crf_row.addWidget(self._crf)
@@ -70,9 +77,11 @@ class ExportDialog(QDialog):
         grid.addWidget(self._codec, 0, 1)
         grid.addWidget(QLabel("解像度"), 1, 0)
         grid.addWidget(self._resolution, 1, 1)
-        grid.addWidget(QLabel("品質"), 2, 0)
+        grid.addWidget(self._crf_caption, 2, 0)
         grid.addLayout(crf_row, 2, 1)
         grid.setColumnStretch(1, 1)
+        # 品質行はウィジェットを載せてから状態を決める(無圧縮なら隠す)
+        self._apply_codec_crf()
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -88,29 +97,45 @@ class ExportDialog(QDialog):
         return str(self._codec.currentData())
 
     def _apply_codec_crf(self) -> None:
-        """現在のコーデックの CRF レンジと保持値をスライダーへ反映する"""
+        """現在のコーデックの CRF レンジと保持値をスライダーへ反映する
+
+        無圧縮では品質を選べないため、行ごと隠す。
+        """
         codec = self._current_codec()
-        minimum, maximum = ffmpeg.crf_range(codec)
-        self._crf.setRange(minimum, maximum)
-        self._crf.setValue(self._crf_by_codec[codec])
+        lossless = ffmpeg.is_lossless(codec)
+        for widget in (self._crf_caption, self._crf, self._crf_label):
+            widget.setVisible(not lossless)
+        if not lossless:
+            minimum, maximum = ffmpeg.crf_range(codec)
+            self._crf.setRange(minimum, maximum)
+            self._crf.setValue(self._crf_by_codec[codec])
+            self._update_crf_label()
         self._previous_codec = codec  # 次回の切り替えで値を保持するため覚えておく
-        self._update_crf_label()
+        # 隠した行の分だけ縮める(表示に戻したときも高さを取り直す)
+        self.adjustSize()
 
     def _on_codec_changed(self) -> None:
         """コーデック切り替え。直前のコーデックの CRF は保持したままにする"""
-        self._crf_by_codec[self._previous_codec] = self._crf.value()
+        if not ffmpeg.is_lossless(self._previous_codec):
+            self._crf_by_codec[self._previous_codec] = self._crf.value()
         self._apply_codec_crf()
 
     def _update_crf_label(self) -> None:
         self._crf_label.setText(f"CRF {self._crf.value()}")
 
     def export_settings(self) -> ExportSettings:
-        """現在の選択内容。解像度 0 (元のサイズ) は None へ変換する"""
+        """現在の選択内容。解像度 0 (元のサイズ) は None へ変換する
+
+        無圧縮は CRF を使わないため、スライダーの残り値ではなく既定値を入れる。
+        """
         side = int(self._resolution.currentData())
+        codec = self._current_codec()
+        lossless = ffmpeg.is_lossless(codec)
+        crf = ffmpeg.crf_default(codec) if lossless else self._crf.value()
         return ExportSettings(
-            codec=self._current_codec(),
+            codec=codec,
             max_short_side=side or None,
-            crf=self._crf.value(),
+            crf=crf,
         )
 
     def accept(self) -> None:
@@ -128,7 +153,8 @@ class ExportDialog(QDialog):
         if not untouched_fallback:
             self._settings.set_video_resolution(result.max_short_side or 0)
         # CRF はコーデックごとに保存する(切り替えて戻したときに値が残るように)
-        self._crf_by_codec[result.codec] = result.crf
+        if not ffmpeg.is_lossless(result.codec):
+            self._crf_by_codec[result.codec] = result.crf
         for codec, crf in self._crf_by_codec.items():
             self._settings.set_video_crf(codec, crf)
         super().accept()

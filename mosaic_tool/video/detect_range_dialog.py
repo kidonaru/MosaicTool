@@ -10,20 +10,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from mosaic_tool.video.timecode import format_timecode
+
 # 検出間隔の上限 (フレーム)。これを超える間引きは漏れが大きく実用にならない
 DETECT_STEP_MAX = 120
 
 STEP_TOOLTIP = "自動検出を何フレームおきに行うか。増やすと速くなるが漏れやすくなる"
-
-
-def format_timecode(frame: int, fps: float) -> str:
-    """フレーム番号を MM:SS.ss (1 時間以上は H:MM:SS.ss) の表記にする"""
-    seconds = frame / fps if fps > 0 else 0.0
-    hours, rest = divmod(seconds, 3600)
-    minutes, secs = divmod(rest, 60)
-    if hours >= 1:
-        return f"{int(hours)}:{int(minutes):02d}:{secs:05.2f}"
-    return f"{int(minutes):02d}:{secs:05.2f}"
 
 
 def detect_frame_count(start: int, end: int, step: int) -> int:
@@ -43,7 +35,6 @@ class DetectRangeDialog(QDialog):
         self,
         total_frames: int,
         fps: float,
-        current_frame: int,
         step: int,
         parent=None,
     ):
@@ -51,9 +42,10 @@ class DetectRangeDialog(QDialog):
         self._fps = fps
         self.setWindowTitle("検出範囲")
         last = max(0, total_frames - 1)
+        # 既定は動画全体。表示中フレームからではなく必ず先頭から始める
         self._start = QSpinBox()
         self._start.setRange(0, last)
-        self._start.setValue(min(max(0, current_frame), last))
+        self._start.setValue(0)
         self._end = QSpinBox()
         self._end.setRange(0, last)
         self._end.setValue(last)

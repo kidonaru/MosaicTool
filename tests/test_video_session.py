@@ -139,6 +139,38 @@ class TestAddIntervals:
         assert vr.region.image_path().boundingRect() == QRectF(0, 0, 100, 100)
 
 
+class TestClearAutoRegions:
+    def _session_with_auto(self, *spans):
+        session = make_session()
+        session.regions = [
+            VideoRegion(make_region(), start, end, source=RegionSource.AUTO)
+            for start, end in spans
+        ]
+        return session
+
+    def test_removes_overlapping_auto_regions(self):
+        session = self._session_with_auto((0, 10), (20, 30))
+        assert session.clear_auto_regions(5, 25) == 2
+        assert session.regions == []
+
+    def test_keeps_auto_regions_outside_the_range(self):
+        session = self._session_with_auto((0, 10), (50, 60))
+        assert session.clear_auto_regions(20, 40) == 0
+        assert len(session.regions) == 2
+
+    def test_keeps_hand_drawn_regions(self):
+        session = make_session()
+        pen = VideoRegion(make_region(), 0, 100, source=RegionSource.PEN)
+        auto = VideoRegion(make_region(), 0, 100, source=RegionSource.AUTO)
+        session.regions = [pen, auto]
+        assert session.clear_auto_regions(0, 100) == 1
+        assert session.regions == [pen]
+
+    def test_touching_the_edge_counts_as_overlap(self):
+        session = self._session_with_auto((0, 10))
+        assert session.clear_auto_regions(10, 20) == 1
+
+
 class TestVideoRegionLane:
     def test_lane_defaults_to_none(self):
         assert VideoRegion(make_region(), 0, 5).lane is None

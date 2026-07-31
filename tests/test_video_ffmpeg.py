@@ -41,6 +41,19 @@ def test_mc_video_path_is_mp4():
     assert ffmpeg.mc_video_path(Path("C:/x/movie.mkv")) == Path("C:/x/movie_mc.mp4")
 
 
+def test_mc_video_path_is_avi_for_rawvideo():
+    # 無圧縮は mp4 に収められないため AVI で出す
+    assert ffmpeg.mc_video_path(Path("C:/x/movie.mkv"), "rawvideo") == Path(
+        "C:/x/movie_mc.avi"
+    )
+
+
+def test_only_rawvideo_is_lossless():
+    assert ffmpeg.is_lossless("rawvideo")
+    assert not ffmpeg.is_lossless("h264")
+    assert not ffmpeg.is_lossless("h265")
+
+
 class TestParseProbe:
     def test_basic(self):
         info = ffmpeg.parse_probe(
@@ -202,6 +215,50 @@ class TestCrfPresets:
         assert ffmpeg.crf_default("av1") == 18
 
 
+class TestEstimatedOutputBytes:
+    def _info(self, w=1920, h=1080, frames=100):
+        return ffmpeg.VideoInfo(w, h, 30.0, "30/1", frames, 3.0, None)
+
+    def test_compressed_codecs_are_not_estimated(self):
+        # 中身次第で何倍も変わるため、当てにならない数字は出さない
+        for codec in ("h264", "h265"):
+            settings = ffmpeg.ExportSettings(codec=codec)
+            assert ffmpeg.estimated_output_bytes(self._info(), settings) is None
+
+    def test_rawvideo_is_the_raw_frame_size_with_a_margin(self):
+        settings = ffmpeg.ExportSettings(codec="rawvideo")
+        raw = 1920 * 1080 * 3 * 100
+        estimated = ffmpeg.estimated_output_bytes(self._info(), settings)
+        assert estimated == int(raw * ffmpeg.LOSSLESS_SIZE_MARGIN)
+
+    def test_estimate_follows_the_export_resolution(self):
+        # 縮小して書き出すなら見積もりも縮む
+        settings = ffmpeg.ExportSettings(codec="rawvideo", max_short_side=480)
+        width, height = ffmpeg.export_size(self._info(), 480)
+        raw = width * height * 3 * 100
+        estimated = ffmpeg.estimated_output_bytes(self._info(), settings)
+        assert estimated == int(raw * ffmpeg.LOSSLESS_SIZE_MARGIN)
+        assert estimated < ffmpeg.estimated_output_bytes(
+            self._info(), ffmpeg.ExportSettings(codec="rawvideo")
+        )
+
+
+class TestFreeBytes:
+    def test_reads_the_destination_drive(self, tmp_path):
+        assert ffmpeg.free_bytes(tmp_path / "out.avi") > 0
+
+    def test_missing_directory_returns_none(self, tmp_path):
+        assert ffmpeg.free_bytes(tmp_path / "nope" / "out.avi") is None
+
+
+class TestFormatSize:
+    def test_gigabytes(self):
+        assert ffmpeg.format_size(3 * 1024 ** 3) == "3.0 GB"
+
+    def test_megabytes_below_a_gigabyte(self):
+        assert ffmpeg.format_size(500 * 1024 ** 2) == "500 MB"
+
+
 class TestExportSize:
     def _info(self, w, h):
         return ffmpeg.VideoInfo(w, h, 30.0, "30/1", 90, 3.0, None)
@@ -258,6 +315,30 @@ class TestEncodeExportSettings:
         cmd = self._cmd(odd, ffmpeg.ExportSettings())
         assert cmd[cmd.index("-vf") + 1] == "scale=100:56"
 
+    def test_h264_uses_the_mp4_faststart_flag(self, info):
+        cmd = self._cmd(info, ffmpeg.ExportSettings())
+        assert cmd[cmd.index("-movflags") + 1] == "+faststart"
+
+    def test_rawvideo_is_uncompressed_without_crf(self, info):
+        cmd = self._cmd(info, ffmpeg.ExportSettings(codec="rawvideo"))
+        assert cmd[cmd.index("-c:v") + 1] == "rawvideo"
+        assert cmd[cmd.index("-pix_fmt", cmd.index("-c:v")) + 1] == "bgr24"
+        assert "-crf" not in cmd
+        # faststart は mp4 専用のため付けない
+        assert "-movflags" not in cmd
+
+    def test_rawvideo_scales_like_the_other_codecs(self):
+        uhd = ffmpeg.VideoInfo(3840, 2160, 30.0, "30/1", 90, 3.0, None)
+        cmd = self._cmd(
+            uhd, ffmpeg.ExportSettings(codec="rawvideo", max_short_side=1080)
+        )
+        assert cmd[cmd.index("-vf") + 1] == "scale=1920:1080"
+
+    def test_rawvideo_uses_pcm_audio(self, info):
+        # AVI は AAC を収めにくいため音声も無圧縮にする
+        cmd = self._cmd(info, ffmpeg.ExportSettings(codec="rawvideo"))
+        assert cmd[cmd.index("-c:a") + 1] == "pcm_s16le"
+
 
 class TestFfmpegDir:
     def test_is_outside_the_inference_runtime(self, tmp_path, monkeypatch):
@@ -265,3 +346,29 @@ class TestFfmpegDir:
         monkeypatch.setattr("mosaic_tool.video.ffmpeg.base_dir", lambda: tmp_path)
         monkeypatch.setattr("mosaic_tool.detect.paths.base_dir", lambda: tmp_path)
         assert paths.runtime_dir() not in ffmpeg.ffmpeg_dir().parents
+
+
+class TestThumbnails:
+    def test_step_divides_into_the_target_count(self):
+        assert ffmpeg.thumbnail_step(1000, 100) == 10
+
+    def test_step_is_at_least_one_for_short_videos(self):
+        assert ffmpeg.thumbnail_step(30, 100) == 1
+
+    def test_step_uses_the_default_count(self):
+        assert ffmpeg.thumbnail_step(ffmpeg.THUMBNAIL_COUNT * 4) == 4
+
+    def test_command_streams_selected_frames_as_rawvideo(self, info):
+        cmd = ffmpeg.thumbnails_command(Path("in.mp4"), info, 5, (160, 90))
+        vf = cmd[cmd.index("-vf") + 1]
+        assert "fps=30/1" in vf
+        assert r"select='not(mod(n\,5))'" in vf
+        assert "scale=160:90" in vf
+        assert cmd[cmd.index("-fps_mode") + 1] == "vfr"
+        assert cmd[cmd.index("-f") + 1] == "rawvideo"
+        assert cmd[cmd.index("-pix_fmt") + 1] == "rgb24"
+        assert cmd[-1] == "-"
+
+    def test_command_without_step_has_no_select(self, info):
+        cmd = ffmpeg.thumbnails_command(Path("in.mp4"), info, 1, (160, 90))
+        assert "select" not in cmd[cmd.index("-vf") + 1]

@@ -12,9 +12,9 @@ from mosaic_tool.video.detect_range_dialog import (  # noqa: E402
 )
 
 
-def make_dialog(total=1800, fps=30.0, current=120, step=1):
+def make_dialog(total=1800, fps=30.0, step=1):
     QApplication.instance() or QApplication([])
-    return DetectRangeDialog(total, fps, current, step)
+    return DetectRangeDialog(total, fps, step)
 
 
 class TestFormatTimecode:
@@ -47,31 +47,32 @@ class TestDetectFrameCount:
 
 
 class TestDialog:
-    def test_defaults_to_current_frame_through_the_last_frame(self):
-        dialog = make_dialog(total=1800, current=120)
-        assert dialog.range_result() == (120, 1799, 1)
+    def test_defaults_to_the_whole_video(self):
+        # 開始は表示中フレームによらず常に先頭 (0)
+        assert make_dialog(total=1800).range_result() == (0, 1799, 1)
 
     def test_keeps_the_previous_step(self):
         assert make_dialog(step=7).range_result()[2] == 7
 
     def test_start_cannot_exceed_the_end(self):
-        dialog = make_dialog(total=1800, current=0)
+        dialog = make_dialog(total=1800)
         dialog._end.setValue(100)
         dialog._start.setValue(500)
         assert dialog.range_result()[0] == 100
 
     def test_end_cannot_go_below_the_start(self):
-        dialog = make_dialog(total=1800, current=200)
+        dialog = make_dialog(total=1800)
+        dialog._start.setValue(200)
         dialog._end.setValue(10)
         assert dialog.range_result()[1] == 200
 
     def test_count_label_follows_the_values(self):
-        dialog = make_dialog(total=1800, current=0)
+        dialog = make_dialog(total=1800)
         dialog._end.setValue(100)
         dialog._step.setValue(10)
         assert "11" in dialog._count_label.text()
 
     def test_time_labels_follow_the_values(self):
-        dialog = make_dialog(total=1800, fps=30.0, current=0)
+        dialog = make_dialog(total=1800, fps=30.0)
         dialog._start.setValue(30)
         assert dialog._start_time.text() == "00:01.00"
