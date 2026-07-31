@@ -89,8 +89,9 @@ def place_lanes(
 - 手動レーン指定が継続判定より優先される
 - `rects=None` では従来と同じ割り当てになる
 
-`tests/test_regions.py`（`_iou` の改名）と既存の `place_lanes` 呼び出し側テストは
-シグネチャ変更に追随する。
+`_iou` は直接テストされていない（`drop_duplicate_regions` 経由のみ）ため、
+改名によるテスト修正は不要。`place_lanes` の第 3 引数は省略可能なので、
+既存の呼び出し側テストも変更しない。
 
 ## 非対象
 
