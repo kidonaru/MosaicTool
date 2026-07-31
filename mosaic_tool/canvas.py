@@ -410,11 +410,13 @@ class MosaicCanvas(QGraphicsView):
     """画像と範囲を表示・編集するビュー"""
 
     regions_changed = Signal()  # 範囲の追加/削除/変形の通知(未保存フラグ用)
+    selection_changed = Signal()  # 範囲の選択状態の通知(動画モードの区間表示用)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._scene = QGraphicsScene(self)
         self.setScene(self._scene)
+        self._scene.selectionChanged.connect(self.selection_changed)
         self.setRenderHints(
             QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform
         )
@@ -623,12 +625,28 @@ class MosaicCanvas(QGraphicsView):
         """全範囲の画像座標パス(保存時のマスク生成に使う)"""
         return [item.image_path() for item in self._region_items()]
 
-    def get_regions(self) -> list[Region]:
-        """モデルを同期して全範囲を返す(画像切替時の保持用)"""
-        items = self._region_items()
+    @staticmethod
+    def _synced_regions(items: list[RegionItem]) -> list[Region]:
+        """モデルを同期してから Region を取り出す"""
         for item in items:
             item.sync_model()
         return [item.region for item in items]
+
+    def get_regions(self) -> list[Region]:
+        """モデルを同期して全範囲を返す(画像切替時の保持用)"""
+        return self._synced_regions(self._region_items())
+
+    def selected_regions(self) -> list[Region]:
+        """モデルを同期して選択中の範囲を返す(動画モードの区間指定用)"""
+        return self._synced_regions(
+            [item for item in self._region_items() if item.isSelected()]
+        )
+
+    def select_regions(self, regions: list[Region]) -> None:
+        """指定した Region のアイテムだけを選択状態にする(同一インスタンス比較)"""
+        targets = {id(r) for r in regions}
+        for item in self._region_items():
+            item.setSelected(id(item.region) in targets)
 
     def undo(self) -> None:
         """直前の操作(追加/削除/変形)を取り消す"""
