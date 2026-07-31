@@ -71,9 +71,7 @@ class FrameReader(QThread):
     def stop(self) -> None:
         """読み出しを打ち切る(キューを空にして投入待ちも解く)"""
         self._stop = True
-        proc = self._proc
-        if proc is not None and proc.poll() is None:
-            proc.kill()
+        video_ffmpeg.kill_process(self._proc)
         self._drain()
 
     def _drain(self) -> None:
@@ -110,10 +108,7 @@ class FrameReader(QThread):
                 self._put(data)
                 if self._stop:
                     break
-        proc.stdout.close()
-        if proc.poll() is None:
-            proc.kill()
-        proc.wait()
+        video_ffmpeg.close_process(proc)
 
     def _put(self, data: bytes) -> None:
         """キューへ入れる(満杯なら停止要求を見ながら待つ)"""

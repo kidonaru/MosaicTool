@@ -38,9 +38,7 @@ class Thumbnailer(QThread):
     def stop(self) -> None:
         """スレッドを終わらせる(読み出し中ならパイプを切って解く)"""
         self._quit = True
-        proc = self._proc
-        if proc is not None and proc.poll() is None:
-            proc.kill()
+        video_ffmpeg.kill_process(self._proc)
         self.wait(STOP_WAIT_MS)
 
     def run(self) -> None:
@@ -90,10 +88,4 @@ class Thumbnailer(QThread):
 
     def _close(self) -> None:
         proc, self._proc = self._proc, None
-        if proc is None:
-            return
-        if proc.stdout is not None:
-            proc.stdout.close()
-        if proc.poll() is None:
-            proc.kill()
-        proc.wait()
+        video_ffmpeg.close_process(proc)

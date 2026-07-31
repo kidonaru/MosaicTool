@@ -109,6 +109,22 @@ def subprocess_flags() -> int:
     return 0
 
 
+def kill_process(proc: subprocess.Popen | None) -> None:
+    """起動済みのプロセスを落とす(未起動・終了済みなら何もしない)"""
+    if proc is not None and proc.poll() is None:
+        proc.kill()
+
+
+def close_process(proc: subprocess.Popen | None) -> None:
+    """パイプを閉じてプロセスを落とし、後始末が終わるまで待つ"""
+    if proc is None:
+        return
+    if proc.stdout is not None:
+        proc.stdout.close()
+    kill_process(proc)
+    proc.wait()
+
+
 @dataclass(frozen=True)
 class VideoInfo:
     """probe で得た動画の基本情報。fps_expr はフィルタへ渡す分数表記("30000/1001" 等)"""

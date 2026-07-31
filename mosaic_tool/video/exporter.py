@@ -214,6 +214,14 @@ class VideoExporter(QThread):
 
     def _remove_partial(self) -> None:
         """中断・失敗時の書きかけファイルを消す"""
+        # kill 直後は Windows でエンコーダが出力ファイルを掴んだままのことがあり、
+        # 解放を待たずに unlink すると PermissionError で書きかけが残ってしまう
+        encoder = self._encoder
+        if encoder is not None:
+            try:
+                encoder.wait(timeout=KILL_WAIT)
+            except subprocess.TimeoutExpired:
+                pass
         try:
             self._dest.unlink(missing_ok=True)
         except OSError:

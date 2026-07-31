@@ -56,8 +56,7 @@ class Scrubber(QThread):
             self._quit = True
             proc = self._proc
             self._cond.notify()
-        if proc is not None and proc.poll() is None:
-            proc.kill()
+        video_ffmpeg.kill_process(proc)
         self.wait(STOP_WAIT_MS)
 
     def run(self) -> None:
@@ -158,10 +157,4 @@ class Scrubber(QThread):
     def _close(self) -> None:
         with self._cond:
             proc, self._proc = self._proc, None
-        if proc is None:
-            return
-        if proc.stdout is not None:
-            proc.stdout.close()
-        if proc.poll() is None:
-            proc.kill()
-        proc.wait()
+        video_ffmpeg.close_process(proc)

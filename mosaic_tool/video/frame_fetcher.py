@@ -47,8 +47,7 @@ class FrameFetcher(QThread):
             self._quit = True
             proc = self._proc
             self._cond.notify()
-        if proc is not None and proc.poll() is None:
-            proc.kill()
+        video_ffmpeg.kill_process(proc)
         self.wait(STOP_WAIT_MS)
 
     def run(self) -> None:
