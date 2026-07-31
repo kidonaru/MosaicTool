@@ -4,6 +4,9 @@
 # 全レシピを 1 行の python 呼び出しに統一しているため、レシピ実行シェルの差は影響しない
 # (just のシェバングレシピは Windows で動かないため使わない)
 
+# just は既定で sh を使うが、Windows には sh が無いことが多いので PowerShell を使う
+set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
+
 _default:
     @just --list
 

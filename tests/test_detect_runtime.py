@@ -1,6 +1,7 @@
 """推論環境セットアップのコマンド組み立ての検証(uv は実行しない)"""
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 from mosaic_tool.detect import runtime
 
@@ -34,8 +35,49 @@ def test_cpu_install_has_no_cuda_index():
 
 def test_gpu_install_adds_cuda_index(monkeypatch):
     monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(runtime, "gpu_compute_capability", lambda: 8.9)
     cmd = runtime.install_command(UV, RUNTIME, use_gpu=True)
     assert cmd[-2:] == ["--extra-index-url", runtime.TORCH_CUDA_INDEX_URL]
+
+
+def test_gpu_install_uses_blackwell_cuda_index(monkeypatch):
+    """RTX 50 系(sm_120)は cu121 のビルドにカーネルが無いため配布元を変える"""
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(runtime, "gpu_compute_capability", lambda: 12.0)
+    cmd = runtime.install_command(UV, RUNTIME, use_gpu=True)
+    assert cmd[-2:] == ["--extra-index-url", runtime.TORCH_CUDA_INDEX_URL_BLACKWELL]
+
+
+def test_cuda_index_falls_back_when_gpu_is_unknown(monkeypatch):
+    monkeypatch.setattr(runtime, "gpu_compute_capability", lambda: None)
+    assert runtime.cuda_index_url() == runtime.TORCH_CUDA_INDEX_URL
+
+
+def test_compute_capability_takes_the_oldest_gpu(monkeypatch):
+    """複数枚あるときは全部で動くよう最も古い世代に合わせる"""
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *a, **kw: SimpleNamespace(stdout="12.0\n8.6\n"),
+    )
+    assert runtime.gpu_compute_capability() == 8.6
+
+
+def test_compute_capability_is_none_without_nvidia_smi(monkeypatch):
+    def raise_not_found(*args, **kwargs):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(runtime.subprocess, "run", raise_not_found)
+    assert runtime.gpu_compute_capability() is None
+
+
+def test_compute_capability_ignores_unparsable_output(monkeypatch):
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *a, **kw: SimpleNamespace(stdout="N/A\n"),
+    )
+    assert runtime.gpu_compute_capability() is None
 
 
 def test_has_nvidia_gpu_uses_nvidia_smi(monkeypatch):

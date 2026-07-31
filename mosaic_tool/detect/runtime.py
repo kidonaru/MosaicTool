@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -14,6 +15,12 @@ PYTHON_VERSION = "3.11"
 PACKAGES = ["ultralytics", "torch", "torchvision"]
 # CUDA 版 torch の配布元(automosaic と同じ cu121 系)
 TORCH_CUDA_INDEX_URL = "https://download.pytorch.org/whl/cu121"
+# Blackwell 向けの配布元。cu121 のビルドには Blackwell 用のカーネルが無く、
+# 推論時に「no kernel image is available for execution on the device」で落ちる。
+TORCH_CUDA_INDEX_URL_BLACKWELL = "https://download.pytorch.org/whl/cu128"
+# Blackwell の下限 Compute Capability(データセンター向け 10.0 / RTX 50 系 12.0)。
+# これより古い GPU は cu128 のビルドが対応を切っているため cu121 のままにする。
+BLACKWELL_MIN_COMPUTE_CAPABILITY = 10.0
 
 
 def venv_command(uv: Path, runtime: Path) -> list[str]:
@@ -32,8 +39,46 @@ def install_command(uv: Path, runtime: Path, use_gpu: bool) -> list[str]:
     """
     cmd = [str(uv), "pip", "install", "--python", str(runtime), *PACKAGES]
     if use_gpu and sys.platform != "darwin":
-        cmd += ["--extra-index-url", TORCH_CUDA_INDEX_URL]
+        cmd += ["--extra-index-url", cuda_index_url()]
     return cmd
+
+
+def cuda_index_url() -> str:
+    """搭載 GPU に合う CUDA 版 torch の配布元を選ぶ
+
+    GPU が分からないときは対応範囲の広い cu121 を選ぶ。
+    """
+    capability = gpu_compute_capability()
+    if capability is not None and capability >= BLACKWELL_MIN_COMPUTE_CAPABILITY:
+        return TORCH_CUDA_INDEX_URL_BLACKWELL
+    return TORCH_CUDA_INDEX_URL
+
+
+def gpu_compute_capability() -> float | None:
+    """NVIDIA GPU の Compute Capability(取得できなければ None)
+
+    複数枚ある場合は、すべてで動く構成にするため最も古い世代に合わせる。
+    """
+    try:
+        output = subprocess.run(
+            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            # セットアップ開始の操作を長く待たせないため短く打ち切る
+            # (取得できなければ対応範囲の広い cu121 で続行する)
+            timeout=3,
+            # GUI アプリから呼ぶためコンソール窓を出さない
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    capabilities = []
+    for line in output.splitlines():
+        try:
+            capabilities.append(float(line.strip()))
+        except ValueError:
+            continue
+    return min(capabilities) if capabilities else None
 
 
 def supports_gpu_choice() -> bool:

@@ -252,3 +252,18 @@ def test_protocol_output_is_isolated_from_library_prints(monkeypatch):
 
     assert protocol.getvalue() == '{"ok": true, "ready": true}\n'
     assert "Ultralytics" in noise.getvalue()
+
+
+def test_error_message_adds_hint_for_unsupported_gpu():
+    """GPU 非対応の CUDA エラーには対処方法を添えること"""
+    e = RuntimeError(
+        "CUDA error: no kernel image is available for execution on the device"
+    )
+    message = worker_main.error_message(e)
+    assert "再セットアップ" in message
+    assert "RuntimeError" in message
+
+
+def test_error_message_keeps_other_errors_as_is():
+    message = worker_main.error_message(ValueError("壊れた画像"))
+    assert message == "ValueError: 壊れた画像"

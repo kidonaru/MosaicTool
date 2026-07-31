@@ -1,10 +1,11 @@
 """MainWindow のプレビュー操作(Tab ショートカット・画像切替時の解除)の検証"""
+import io as std_io
 import os
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QSettings, Qt
-from PySide6.QtGui import QKeySequence
+from PySide6.QtCore import QProcess, QRectF, QSettings, Qt
+from PySide6.QtGui import QImage, QKeySequence
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import (  # noqa: E402
@@ -16,7 +17,14 @@ from PySide6.QtWidgets import (  # noqa: E402
 from PIL import Image  # noqa: E402
 
 from mosaic_tool.app import PEN_STEP, THRESHOLD_STEP, MainWindow  # noqa: E402
+from mosaic_tool.regions import Region, RegionKind  # noqa: E402
 from mosaic_tool.settings import AppSettings  # noqa: E402
+from mosaic_tool.video import ffmpeg as video_ffmpeg  # noqa: E402
+from mosaic_tool.video.ffmpeg import VideoInfo  # noqa: E402
+from mosaic_tool.video.frame_fetcher import FrameFetcher  # noqa: E402
+from mosaic_tool.video.scrubber import Scrubber  # noqa: E402
+from mosaic_tool.video.thumbnailer import Thumbnailer  # noqa: E402
+from mosaic_tool.video.session import RegionSource, VideoRegion  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -68,6 +76,8 @@ def test_toolbar_actions_show_key_in_tooltip(window):
         "保存": f"保存 ({key_text(QKeySequence.StandardKey.Save)})",
         "プレビュー": f"プレビュー ({key_text(Qt.Key.Key_Tab)})",
         "自動検出": f"自動検出 ({key_text(Qt.Key.Key_D)})",
+        # ショートカットを持たないため説明文をそのまま出す
+        "タイムライン": "タイムラインウィンドウを表示する(動画モードのみ)",
     }
     tooltips = {
         act.text(): act.toolTip()
@@ -432,3 +442,726 @@ def test_setup_is_not_shown_when_the_runtime_is_ready(window, monkeypatch):
     window._detect_act.trigger()
     assert opened == []
     window._detect_window.close()
+
+
+class SyncFrameFetcher(FrameFetcher):
+    """テストを決定的にするため、要求を同じスレッドで即座に処理するフェッチャー"""
+
+    def start(self):  # スレッドは立てない
+        pass
+
+    def request(self, frame):
+        try:
+            data = video_ffmpeg.extract_frame(self._path, frame, self._info)
+        except video_ffmpeg.VideoError as e:
+            self.failed.emit(frame, str(e))
+            return
+        self.frame_ready.emit(frame, data)
+
+
+class SyncScrubber(Scrubber):
+    """テストを決定的にするため、プロキシフレームを同じスレッドで即座に返す"""
+
+    def start(self):  # スレッドは立てない
+        pass
+
+    def request(self, frame):
+        width, height = self._size
+        image = QImage(width, height, QImage.Format.Format_RGB888)
+        image.fill(0)
+        self.frame_ready.emit(frame, image)
+
+
+class NullThumbnailer(Thumbnailer):
+    """テストを決定的にするため、スレッドを立てないサムネイル生成"""
+
+    def start(self):
+        pass
+
+
+class InstantSettleTimer:
+    """シーク静定のデバウンスを即時発火させるタイマーの代役"""
+
+    def __init__(self, fire):
+        self._fire = fire
+
+    def start(self):
+        self._fire()
+
+    def stop(self):
+        pass
+
+
+@pytest.fixture
+def video(window, monkeypatch, tmp_path):
+    """ffmpeg をモックして動画モードへ入れる"""
+    info = VideoInfo(64, 48, 30.0, "30/1", 100, 3.3, None)
+    buf = std_io.BytesIO()
+    Image.new("RGB", (64, 48)).save(buf, "PNG")
+    monkeypatch.setattr(
+        "mosaic_tool.app.video_ffmpeg.is_ffmpeg_ready", lambda: True
+    )
+    monkeypatch.setattr("mosaic_tool.app.video_ffmpeg.probe", lambda p: info)
+    monkeypatch.setattr(
+        "mosaic_tool.app.video_ffmpeg.extract_frame",
+        lambda *a, **k: buf.getvalue(),
+    )
+    monkeypatch.setattr("mosaic_tool.app.FrameFetcher", SyncFrameFetcher)
+    monkeypatch.setattr("mosaic_tool.app.Scrubber", SyncScrubber)
+    monkeypatch.setattr("mosaic_tool.app.Thumbnailer", NullThumbnailer)
+    monkeypatch.setattr(
+        window, "_settle_timer", InstantSettleTimer(window._on_seek_settled)
+    )
+    path = tmp_path / "movie.mp4"
+    path.write_bytes(b"")
+    window._open_video(path)
+    yield window
+    # 動画モードは自動保存の対象外のため、未保存のまま close() すると
+    # 破棄確認のモーダルダイアログでテストが止まる
+    window._dirty = False
+
+
+def _rect_region() -> Region:
+    return Region(kind=RegionKind.RECT, rect=QRectF(0, 0, 10, 10))
+
+
+class TestTimelineWindowIntegration:
+    def test_open_video_shows_timeline_window(self, video):
+        assert video._timeline_window is not None
+        assert video._timeline_window.isVisible()
+
+    def test_leave_video_hides_timeline_window(self, video):
+        video._leave_video_mode()
+        assert not video._timeline_window.isVisible()
+
+    def test_timeline_action_enabled_only_in_video_mode(self, window, video):
+        assert video._timeline_act.isEnabled()
+        video._leave_video_mode()
+        assert not video._timeline_act.isEnabled()
+
+    def test_timeline_action_reopens_the_window(self, video):
+        video._timeline_window.close()
+        video._timeline_act.trigger()
+        assert video._timeline_window.isVisible()
+
+    def test_seek_from_window_moves_bottom_bar(self, video):
+        video._timeline_window.seek_requested.emit(30)
+        assert video._timeline.frame() == 30
+        assert video._video.frame == 30
+
+    def test_frame_change_moves_playhead(self, video):
+        video._timeline.seek(20)
+        assert video._timeline_window._area._frame == 20
+
+    def test_interval_edit_marks_dirty(self, video):
+        region = _rect_region()
+        video.canvas.add_region(region)      # sync で現在フレームの区間になる
+        video._dirty = False
+        vr = video._video.find(region)
+        vr.start, vr.end = 0, 50             # タイムラインが直接書き換える
+        video._timeline_window.intervals_edited.emit()
+        assert (vr.start, vr.end) == (0, 50)
+        assert video._dirty
+
+    def test_interval_edit_shows_regions_newly_covering_the_frame(self, video):
+        # 現在フレーム(0)に掛からない区間を掛かるよう伸ばしたら表示へ現れる
+        region = _rect_region()
+        video._video.regions.append(VideoRegion(region, 50, 60))
+        assert video.canvas.get_regions() == []
+        video._video.find(region).start = 0
+        video._timeline_window.intervals_edited.emit()
+        assert video.canvas.get_regions() == [region]
+
+    def test_delete_from_window_removes_region(self, video):
+        region = _rect_region()
+        video.canvas.add_region(region)
+        video._timeline_window.delete_requested.emit([region])
+        assert video._video.find(region) is None
+        assert video.canvas.get_regions() == []
+
+    def test_delete_offscreen_region_removes_from_session(self, video):
+        # 現在フレーム(0)に掛からない範囲はキャンバスに無くても消せる
+        region = _rect_region()
+        video._video.regions.append(VideoRegion(region, 50, 60))
+        video._timeline_window.delete_requested.emit([region])
+        assert video._video.find(region) is None
+
+    def test_delete_removes_every_selected_region(self, video):
+        shown, hidden = _rect_region(), _rect_region()
+        video.canvas.add_region(shown)
+        video._video.regions.append(VideoRegion(hidden, 50, 60))
+        video._timeline_window.delete_requested.emit([shown, hidden])
+        assert video._video.regions == []
+        assert video.canvas.get_regions() == []
+
+    def test_selection_dropped_outside_interval(self, video):
+        # 区間外のフレームへ移動したら選択は解除され、範囲も表示しない
+        region = _rect_region()
+        video.canvas.add_region(region)      # 区間はフレーム 0 のみ
+        video.canvas.select_regions([region])
+        video._timeline.seek(10)
+        assert video.canvas.get_regions() == []
+        assert video.canvas.selected_regions() == []
+        # 区間そのものは残るので、戻れば再び表示される
+        assert video._video.find(region) is not None
+        video._timeline.seek(0)
+        assert video.canvas.get_regions() == [region]
+
+    def test_window_shows_all_intervals(self, video):
+        video.canvas.add_region(_rect_region())
+        assert len(video._timeline_window._area._rows) == 1
+
+    def test_timeline_selection_flows_to_canvas(self, video):
+        region = _rect_region()
+        video.canvas.add_region(region)
+        video.canvas.select_regions([])
+        video._timeline_window.selection_changed.emit([region])
+        assert video.canvas.selected_regions() == [region]
+
+    def test_timeline_selection_skips_regions_outside_the_frame(self, video):
+        # 現在フレームに掛からない範囲はキャンバスへ流さない(表示が無い)
+        region = _rect_region()
+        video._video.regions.append(VideoRegion(region, 50, 60))
+        video._timeline_window.selection_changed.emit([region])
+        assert video.canvas.selected_regions() == []
+
+    def test_empty_canvas_selection_does_not_clear_the_timeline(self, video):
+        # シーンの作り直しは常に空の選択を通知する。巻き込まれてはいけない
+        region = _rect_region()
+        video.canvas.add_region(region)
+        video._timeline_window.set_selection([region])
+        video.canvas.select_regions([])
+        assert video._timeline_window._area._selection.items() != []
+
+    def test_canvas_selection_flows_to_the_timeline(self, video):
+        region = _rect_region()
+        video.canvas.add_region(region)
+        video.canvas.select_regions([region])
+        items = video._timeline_window._area._selection.items()
+        assert [i.region for i in items] == [region]
+
+    def test_selection_sync_does_not_bounce_back(self, video):
+        # タイムラインの複数選択が、キャンバス経由で可視分だけへ縮まない
+        shown, hidden = _rect_region(), _rect_region()
+        video.canvas.add_region(shown)
+        video._video.regions.append(VideoRegion(hidden, 50, 60))
+        window = video._timeline_window
+        window.set_data(video._video.regions)
+        window._area._selection.replace(video._video.regions)
+        window._area.selection_changed.emit(
+            [vr.region for vr in video._video.regions]
+        )
+        assert len(window._area._selection) == 2
+
+    def test_frame_redraw_keeps_focus_when_window_inactive(self, video, monkeypatch):
+        # タイムラインウィンドウ操作中にフォーカスを奪うと Delete や Space が
+        # 効かなくなるため、メインウィンドウが非アクティブなら受け取らない
+        monkeypatch.setattr(type(video), "isActiveWindow", lambda self: False)
+        grabbed = []
+        monkeypatch.setattr(
+            type(video.canvas), "setFocus", lambda self: grabbed.append(True)
+        )
+        video._timeline.seek(10)
+        assert grabbed == []
+
+    def test_frame_redraw_takes_focus_when_window_active(self, video, monkeypatch):
+        monkeypatch.setattr(type(video), "isActiveWindow", lambda self: True)
+        grabbed = []
+        monkeypatch.setattr(
+            type(video.canvas), "setFocus", lambda self: grabbed.append(True)
+        )
+        video._timeline.seek(10)
+        assert grabbed == [True]
+
+
+class TestVideoDetectRange:
+    @pytest.fixture
+    def captured(self, video, monkeypatch):
+        """検出範囲ダイアログを OK 固定にし、ffmpeg の起動引数を捕まえる"""
+        calls = {}
+
+        class FakeDialog:
+            def __init__(self, total_frames, fps, step, parent=None):
+                calls["args"] = (total_frames, fps, step)
+
+            def exec(self):
+                return QDialog.DialogCode.Accepted
+
+            def range_result(self):
+                return calls.get("result", (10, 39, 5))
+
+        monkeypatch.setattr("mosaic_tool.app.DetectRangeDialog", FakeDialog)
+        monkeypatch.setattr(
+            "mosaic_tool.app.QProcess.start",
+            lambda self, program, args: calls.setdefault("cmd", [program, *args]),
+        )
+        return calls
+
+    def test_dialog_receives_the_video_info(self, video, captured):
+        # 表示中フレームに関わらず、ダイアログには動画情報と検出間隔だけを渡す
+        video._timeline.seek(40)
+        video._start_video_detect({"m.pt": {"conf": 0.5, "classes": []}})
+        assert captured["args"] == (100, 30.0, 1)
+        video._cleanup_video_detect()
+
+    def test_extraction_uses_the_selected_range(self, video, captured):
+        video._start_video_detect({"m.pt": {"conf": 0.5, "classes": []}})
+        cmd = captured["cmd"]
+        # 開始 10 / 終了 39 / 間隔 5 なので 6 枚
+        assert cmd[cmd.index("-frames:v") + 1] == "6"
+        # -ss は小数 6 桁で書き出すため、絶対誤差で比べる
+        assert float(cmd[cmd.index("-ss") + 1]) == pytest.approx(9.5 / 30.0, abs=1e-6)
+        assert video._video_detect.start == 10
+        assert video._video_detect.end == 39
+        video._cleanup_video_detect()
+
+    def test_cancelling_the_dialog_does_not_extract(self, video, monkeypatch):
+        class FakeDialog:
+            def __init__(self, *a, **k):
+                pass
+
+            def exec(self):
+                return QDialog.DialogCode.Rejected
+
+        monkeypatch.setattr("mosaic_tool.app.DetectRangeDialog", FakeDialog)
+        monkeypatch.setattr(
+            "mosaic_tool.app.QProcess.start",
+            lambda *a: pytest.fail("展開が始まった"),
+        )
+        video._start_video_detect({"m.pt": {"conf": 0.5, "classes": []}})
+        assert video._video_detect is None
+
+    def test_the_step_is_kept_for_the_next_run(self, video, captured):
+        video._start_video_detect({"m.pt": {"conf": 0.5, "classes": []}})
+        video._cleanup_video_detect()
+        assert video._detect_step == 5
+
+    def test_detected_frames_are_offset_by_the_start(self, video, captured):
+        video._start_video_detect({"m.pt": {"conf": 0.5, "classes": []}})
+        state = video._video_detect
+        # 最後の 1 枚として扱い、その場で区間のマージまで進める
+        state.files = [Path(f"f{i}.jpg") for i in range(3)]
+        state.idx = 2
+        video._on_video_frame_detected(
+            [{"bbox": [0, 0, 10, 10]}]
+        )
+        # 開始 10 + 2 枚目 × 間隔 5 = フレーム 20
+        assert video._video.regions[0].start == 20
+        video._cleanup_video_detect()
+
+    def test_existing_auto_regions_in_the_range_are_replaced(self, video, captured):
+        # 検出範囲は (10, 39)。重なる自動検出だけを捨て、手描きは残す
+        stale = VideoRegion(_rect_region(), 10, 20, source=RegionSource.AUTO)
+        outside = VideoRegion(_rect_region(), 60, 70, source=RegionSource.AUTO)
+        drawn = VideoRegion(_rect_region(), 10, 20, source=RegionSource.PEN)
+        video._video.regions = [stale, outside, drawn]
+        video._start_video_detect({"m.pt": {"conf": 0.5, "classes": []}})
+        state = video._video_detect
+        state.files = [Path("f0.jpg")]
+        state.idx = 0
+        video._on_video_frame_detected([{"bbox": [0, 0, 10, 10]}])
+        kept = video._video.regions
+        assert not any(vr is stale for vr in kept)
+        assert any(vr is outside for vr in kept)
+        assert any(vr is drawn for vr in kept)
+        video._cleanup_video_detect()
+
+    def test_missing_ffmpeg_is_reported_before_extraction(self, video, monkeypatch):
+        """ffmpeg が消えていたら起動を試みずに知らせること
+
+        起動できなかった QProcess は finished を出さないため、そのまま走らせると
+        「モデルを読み込み中...」のまま固まる。
+        """
+        monkeypatch.setattr(
+            "mosaic_tool.app.video_ffmpeg.is_ffmpeg_ready", lambda: False
+        )
+        monkeypatch.setattr(
+            "mosaic_tool.app.QProcess.start", lambda *a: pytest.fail("展開が始まった")
+        )
+        shown = {}
+        monkeypatch.setattr(
+            QMessageBox, "critical", lambda *a, **k: shown.setdefault("text", a[2])
+        )
+        video._start_video_detect({"m.pt": {"conf": 0.5, "classes": []}})
+        assert video._video_detect is None
+        assert "ffmpeg" in shown["text"]
+
+    def test_extraction_that_fails_to_start_is_reported(self, video, captured, monkeypatch):
+        """起動失敗では finished が来ないため errorOccurred で畳むこと"""
+        shown = {}
+        monkeypatch.setattr(
+            QMessageBox, "critical", lambda *a, **k: shown.setdefault("text", a[2])
+        )
+        video._start_video_detect({"m.pt": {"conf": 0.5, "classes": []}})
+        video._video_detect.proc.errorOccurred.emit(
+            QProcess.ProcessError.FailedToStart
+        )
+        assert video._video_detect is None
+        assert "開始できませんでした" in shown["text"]
+
+    def test_crashed_extraction_is_not_reported_as_a_start_failure(
+        self, video, captured, monkeypatch
+    ):
+        """起動後の異常は「開始できなかった」ではないため文言を分ける"""
+        shown = {}
+        monkeypatch.setattr(
+            QMessageBox, "critical", lambda *a, **k: shown.setdefault("text", a[2])
+        )
+        video._start_video_detect({"m.pt": {"conf": 0.5, "classes": []}})
+        video._video_detect.proc.errorOccurred.emit(QProcess.ProcessError.Crashed)
+        assert video._video_detect is None
+        assert "開始できませんでした" not in shown["text"]
+
+    def test_intervals_are_clamped_to_the_range_end(self, video, captured):
+        captured["result"] = (10, 22, 5)
+        video._start_video_detect({"m.pt": {"conf": 0.5, "classes": []}})
+        state = video._video_detect
+        state.files = [Path(f"f{i}.jpg") for i in range(3)]
+        state.idx = 2  # フレーム 20。間隔 5 なら本来 24 まで伸びる
+        video._on_video_frame_detected([{"bbox": [0, 0, 10, 10]}])
+        assert video._video.regions[0].end == 22
+        video._cleanup_video_detect()
+
+
+class TestPlayback:
+    @pytest.fixture
+    def player(self, video, monkeypatch):
+        """VideoPlayer を差し替えて再生の配線だけを見る
+
+        app 側が frame_ready 等へ接続するため、シグナルは本物と同じ定義を持たせる。
+        """
+        from PySide6.QtCore import QObject, Signal
+        from PySide6.QtGui import QImage
+
+        events = []
+
+        class FakePlayer(QObject):
+            frame_ready = Signal(int, QImage)
+            finished = Signal()
+            failed = Signal(str)
+
+            def __init__(self, path, info, parent=None):
+                super().__init__(parent)
+                self.started: list[int] = []
+                self.stopped = 0
+                self.speed = 1.0
+                self._playing = False
+                events.append(self)
+
+            def is_playing(self):
+                return self._playing
+
+            def start(self, frame):
+                self.started.append(frame)
+                self._playing = True
+
+            def stop(self):
+                self.stopped += 1
+                self._playing = False
+
+            def set_speed(self, speed):
+                self.speed = speed
+
+        monkeypatch.setattr("mosaic_tool.app.VideoPlayer", FakePlayer)
+        return events
+
+    def test_play_button_starts_from_the_current_frame(self, video, player):
+        video._timeline.seek(20)
+        video._timeline.play_clicked.emit()
+        assert player[0].started == [20]
+
+    def test_play_button_stops_while_playing(self, video, player):
+        video._timeline.play_clicked.emit()
+        video._timeline.play_clicked.emit()
+        assert player[0].stopped >= 1
+        assert not video._player.is_playing()
+
+    def test_button_state_follows_the_playback(self, video, player):
+        video._timeline.play_clicked.emit()
+        assert video._timeline.is_playing()
+        video._timeline.play_clicked.emit()
+        assert not video._timeline.is_playing()
+
+    def test_seek_while_playing_restarts_from_the_new_frame(self, video, player):
+        video._timeline.play_clicked.emit()
+        video._timeline.seek(40)
+        # シークが落ち着いた時点(InstantSettleTimer)で新しい位置から流し直す
+        assert player[0].started == [0, 40]
+        assert video._timeline.is_playing()
+
+    def test_seek_while_playing_keeps_the_requested_frame(self, video, player):
+        # 再生位置の更新にスライダーを引き戻されず、要求した位置に留まる
+        video._timeline.play_clicked.emit()
+        video._timeline.seek(40)
+        assert video._timeline.frame() == 40
+
+    def test_seek_to_the_last_frame_stops_instead_of_rewinding(self, video, player):
+        # 末尾までドラッグしたら、そこで止まる(先頭から流し直さない)
+        video._timeline.play_clicked.emit()
+        video._timeline.seek(99)
+        assert player[0].started == [0]
+        assert not video._timeline.is_playing()
+        assert video._timeline.frame() == 99
+
+    def test_finishing_playback_returns_to_the_stopped_state(self, video, player):
+        video._timeline.play_clicked.emit()
+        player[0].stop()  # 末尾到達でエンジンが自分から止まる
+        player[0].finished.emit()
+        assert not video._timeline.is_playing()
+        assert not video.canvas._playback
+
+    def test_play_at_the_last_frame_restarts_from_zero(self, video, player):
+        video._timeline.seek(99)
+        video._timeline.play_clicked.emit()
+        assert player[0].started == [0]
+        assert video._timeline.frame() == 0
+
+    def test_speed_change_is_forwarded(self, video, player):
+        video._timeline.play_clicked.emit()
+        video._timeline._speed_combo.setCurrentIndex(0)
+        assert player[0].speed == 0.25
+
+    def test_timeline_window_space_toggles_playback(self, video, player):
+        video._timeline_window.playback_toggle_requested.emit()
+        assert player[0].started == [0]
+
+    def test_playback_stops_before_detect(self, video, player, monkeypatch):
+        class FakeDialog:
+            def __init__(self, *a, **k):
+                pass
+
+            def exec(self):
+                return QDialog.DialogCode.Rejected
+
+        monkeypatch.setattr("mosaic_tool.app.DetectRangeDialog", FakeDialog)
+        video._timeline.play_clicked.emit()
+        video._start_video_detect({"m.pt": {"conf": 0.5, "classes": []}})
+        assert not video._player.is_playing()
+
+    def test_playback_stops_when_leaving_video_mode(self, video, player):
+        video._timeline.play_clicked.emit()
+        video._leave_video_mode()
+        assert player[0].stopped >= 1
+        assert video._player is None
+
+    def test_frame_ready_updates_the_state(self, video, player):
+        from PySide6.QtGui import QImage
+
+        image = QImage(32, 24, QImage.Format.Format_RGB888)
+        image.fill(0)
+        video._timeline.play_clicked.emit()
+        video._on_playback_frame(15, image)
+        assert video._video.frame == 15
+        assert video._timeline.frame() == 15
+        assert video._timeline_window._area._frame == 15
+
+
+class TestExportDialogWiring:
+    def test_cancel_does_not_start_export(self, video, monkeypatch):
+        class FakeDialog:
+            def __init__(self, *a, **k):
+                pass
+
+            def exec(self):
+                return QDialog.DialogCode.Rejected
+
+        monkeypatch.setattr("mosaic_tool.app.ExportDialog", FakeDialog)
+        monkeypatch.setattr(
+            "mosaic_tool.app.VideoExporter",
+            lambda *a, **k: pytest.fail("キャンセルしたのに書き出しが始まった"),
+        )
+        video._export_video()
+        assert video._exporter is None
+
+    def test_accept_passes_the_chosen_settings_to_the_exporter(
+        self, video, monkeypatch
+    ):
+        chosen = video_ffmpeg.ExportSettings("h265", 720, 40)
+        created = self._export_with(video, monkeypatch, chosen)
+        assert created and created[0][-1] == chosen
+
+    def test_rawvideo_writes_an_avi_next_to_the_source(self, video, monkeypatch):
+        created = self._export_with(
+            video, monkeypatch, video_ffmpeg.ExportSettings("rawvideo")
+        )
+        assert created[0][1] == video._video.path.with_name("movie_mc.avi")
+
+    def test_h264_writes_an_mp4(self, video, monkeypatch):
+        created = self._export_with(
+            video, monkeypatch, video_ffmpeg.ExportSettings("h264")
+        )
+        assert created[0][1] == video._video.path.with_name("movie_mc.mp4")
+
+    def test_blocks_when_the_drive_cannot_hold_the_lossless_output(
+        self, video, monkeypatch
+    ):
+        # 空き容量が見積もりに届かない書き出しは始めさせない
+        warned = []
+        monkeypatch.setattr(
+            "mosaic_tool.app.video_ffmpeg.free_bytes", lambda dest: 1024
+        )
+        monkeypatch.setattr(
+            "mosaic_tool.app.QMessageBox.warning",
+            lambda *args, **k: warned.append(args[2]),
+        )
+        created = self._export_with(
+            video, monkeypatch, video_ffmpeg.ExportSettings("rawvideo")
+        )
+        assert created == []
+        assert warned and "空き容量" in warned[0]
+
+    def test_enough_free_space_confirms_before_the_lossless_export(
+        self, video, monkeypatch
+    ):
+        # 足りていても見積もりを見せて確認する
+        asked = []
+        monkeypatch.setattr(
+            "mosaic_tool.app.video_ffmpeg.free_bytes", lambda dest: 1 << 40
+        )
+        created = self._export_with(
+            video, monkeypatch, video_ffmpeg.ExportSettings("rawvideo"), asked=asked
+        )
+        assert len(created) == 1
+        assert asked and "空き容量" in asked[0]
+
+    def test_cancelling_the_confirmation_skips_the_lossless_export(
+        self, video, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "mosaic_tool.app.video_ffmpeg.free_bytes", lambda dest: 1 << 40
+        )
+        created = self._export_with(
+            video,
+            monkeypatch,
+            video_ffmpeg.ExportSettings("rawvideo"),
+            confirm=QMessageBox.StandardButton.Cancel,
+        )
+        assert created == []
+
+    def test_compressed_export_ignores_the_free_space(self, video, monkeypatch):
+        # 圧縮後のサイズは見積もれないため、空き容量が僅かでも止めない
+        monkeypatch.setattr(
+            "mosaic_tool.app.video_ffmpeg.free_bytes", lambda dest: 1024
+        )
+        monkeypatch.setattr(
+            "mosaic_tool.app.QMessageBox.warning",
+            lambda *a, **k: pytest.fail("圧縮書き出しが空き容量で止められた"),
+        )
+        created = self._export_with(
+            video, monkeypatch, video_ffmpeg.ExportSettings("h264")
+        )
+        assert len(created) == 1
+
+    def _export_with(self, video, monkeypatch, chosen, confirm=None, asked=None):
+        """設定を固定して書き出しを起こし、VideoExporter への引数を返す
+
+        無圧縮はサイズ確認ダイアログが出るため、既定で Ok を返して素通りさせる
+        (confirm で答えを変え、asked に本文を集められる)。
+        """
+
+        class FakeDialog:
+            def __init__(self, *a, **k):
+                pass
+
+            def exec(self):
+                return QDialog.DialogCode.Accepted
+
+            def export_settings(self):
+                return chosen
+
+        class FakeSignal:
+            def connect(self, *a):
+                pass
+
+        created = []
+
+        class FakeExporter:
+            def __init__(self, *args):
+                created.append(args)
+                self.progress = FakeSignal()
+                self.export_finished = FakeSignal()
+
+            def start(self):
+                pass
+
+            def cancel(self):
+                pass
+
+        def fake_question(*args, **kwargs):
+            if asked is not None:
+                asked.append(args[2])
+            return confirm if confirm is not None else QMessageBox.StandardButton.Ok
+
+        monkeypatch.setattr("mosaic_tool.app.ExportDialog", FakeDialog)
+        monkeypatch.setattr("mosaic_tool.app.VideoExporter", FakeExporter)
+        monkeypatch.setattr("mosaic_tool.app.QMessageBox.question", fake_question)
+        video._export_video()
+        # フェイクは完了シグナルを出さないため、後始末は手で戻す
+        video._exporter = None
+        video._export_dialog = None
+        return created
+
+
+class TestVideoWindowTitle:
+    def test_shows_the_head_frame_when_opened(self, video):
+        title = video.windowTitle()
+        assert "movie.mp4" in title
+        assert "[0 / 99 フレーム]" in title
+        assert "00:00.00" in title
+
+    def test_follows_the_seek(self, video):
+        video._timeline.seek(60)
+        # 30fps の 60 フレーム目は 2 秒
+        assert "[60 / 99 フレーム] 00:02.00" in video.windowTitle()
+
+    def test_follows_playback(self, video):
+        image = QImage(32, 24, QImage.Format.Format_RGB888)
+        image.fill(0)
+        video._on_playback_frame(45, image)
+        assert "[45 / 99 フレーム] 00:01.50" in video.windowTitle()
+
+
+class TestAutosaveInVideoMode:
+    def test_disabled_while_a_video_is_open(self, video):
+        assert not video._autosave_check.isEnabled()
+
+    def test_enabled_again_after_leaving_video_mode(self, video):
+        video._leave_video_mode()
+        video._update_nav()
+        assert video._autosave_check.isEnabled()
+
+    def test_video_is_never_autosaved(self, video, monkeypatch):
+        # 自動保存が有効でも動画は書き出さず、通常どおり破棄確認を出す
+        asked = []
+        monkeypatch.setattr(
+            "mosaic_tool.app.QMessageBox.question",
+            lambda *a, **k: asked.append(True) or QMessageBox.StandardButton.Yes,
+        )
+        monkeypatch.setattr(
+            video, "_write_current", lambda: pytest.fail("動画が自動保存された")
+        )
+        video._autosave_check.setChecked(True)
+        video._dirty = True
+        assert video._confirm_discard()
+        assert asked
+
+
+class TestSeekThumbnails:
+    def test_open_video_starts_the_thumbnailer(self, video):
+        assert isinstance(video._thumbnailer, NullThumbnailer)
+
+    def test_thumbnails_flow_into_the_timeline(self, video):
+        image = QImage(4, 3, QImage.Format.Format_RGB888)
+        image.fill(0)
+        video._thumbnailer.thumb_ready.emit(30, image)
+        assert video._timeline._nearest_thumb_frame(40) == 30
+
+    def test_leave_video_stops_the_thumbnailer_and_clears_the_timeline(
+        self, video
+    ):
+        image = QImage(4, 3, QImage.Format.Format_RGB888)
+        image.fill(0)
+        video._thumbnailer.thumb_ready.emit(30, image)
+        video._leave_video_mode()
+        assert video._thumbnailer is None
+        assert video._timeline._nearest_thumb_frame(40) is None

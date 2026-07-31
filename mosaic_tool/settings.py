@@ -8,6 +8,12 @@ from __future__ import annotations
 from PySide6.QtCore import QByteArray, QSettings
 
 from mosaic_tool.version import APP_NAME
+from mosaic_tool.video.ffmpeg import (
+    EXPORT_CODECS,
+    EXPORT_SHORT_SIDES,
+    crf_default,
+    crf_range,
+)
 
 ORG_NAME = APP_NAME
 
@@ -20,6 +26,8 @@ DEFAULT_STRIP_META = False  # メタ削除(既定は元画像のメタ情報を�
 DEFAULT_MODE = "pen"      # ツールモード ("pen" / "rect")
 DEFAULT_CONFIDENCE = 25   # 自動検出の信頼度しきい値 (%)
 DEFAULT_DEVICE = "auto"   # 推論デバイス ("auto" / "cpu")
+DEFAULT_VIDEO_CODEC = "h264"  # 動画書き出しコーデック (EXPORT_CODECS のいずれか)
+DEFAULT_VIDEO_RESOLUTION = 0  # 動画書き出しの短辺上限 px (0 は元のサイズ)
 
 _KEY_BLOCK = "mosaic/block"
 _KEY_THRESHOLD = "mosaic/threshold"
@@ -31,6 +39,10 @@ _KEY_GEOMETRY = "window/geometry"
 # モデル別設定のキー接頭辞(<接頭辞>/<ファイル名>/<項目> で 1 モデル分になる)
 _KEY_MODEL_PREFIX = "detect/models"
 _KEY_DEVICE = "detect/device"
+_KEY_VIDEO_CODEC = "video/codec"
+_KEY_VIDEO_RESOLUTION = "video/resolution"
+# CRF はコーデックごとに適正値が違うため、キーもコーデック別に分ける
+_KEY_VIDEO_CRF_PREFIX = "video/crf"
 
 
 class AppSettings:
@@ -165,6 +177,39 @@ class AppSettings:
 
     def set_device(self, value: str) -> None:
         self._qsettings.setValue(_KEY_DEVICE, value)
+
+    # --- 動画書き出し ---
+
+    def video_codec(self) -> str:
+        value = str(self._qsettings.value(_KEY_VIDEO_CODEC, DEFAULT_VIDEO_CODEC))
+        return value if value in EXPORT_CODECS else DEFAULT_VIDEO_CODEC
+
+    def set_video_codec(self, value: str) -> None:
+        self._qsettings.setValue(_KEY_VIDEO_CODEC, value)
+
+    def video_resolution(self) -> int:
+        """書き出しの短辺上限 px。0 は元のサイズ。プリセット外の値は既定値へ戻す"""
+        try:
+            value = int(
+                self._qsettings.value(_KEY_VIDEO_RESOLUTION, DEFAULT_VIDEO_RESOLUTION)
+            )
+        except (TypeError, ValueError):
+            return DEFAULT_VIDEO_RESOLUTION
+        allowed = (DEFAULT_VIDEO_RESOLUTION, *EXPORT_SHORT_SIDES)
+        return value if value in allowed else DEFAULT_VIDEO_RESOLUTION
+
+    def set_video_resolution(self, value: int) -> None:
+        self._qsettings.setValue(_KEY_VIDEO_RESOLUTION, int(value))
+
+    def video_crf(self, codec: str) -> int:
+        """コーデック別の CRF。レンジ外の値は既定値へ戻す"""
+        minimum, maximum = crf_range(codec)
+        return self._int(
+            f"{_KEY_VIDEO_CRF_PREFIX}/{codec}", crf_default(codec), minimum, maximum
+        )
+
+    def set_video_crf(self, codec: str, value: int) -> None:
+        self._qsettings.setValue(f"{_KEY_VIDEO_CRF_PREFIX}/{codec}", int(value))
 
     # --- ウィンドウジオメトリ ---
 

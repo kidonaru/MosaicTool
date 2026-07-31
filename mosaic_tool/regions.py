@@ -72,7 +72,7 @@ class Region:
         return self.image_transform().map(self.local_path())
 
 
-def _iou(a: QRectF, b: QRectF) -> float:
+def bbox_iou(a: QRectF, b: QRectF) -> float:
     """外接矩形どうしの重なり率 (0.0〜1.0)"""
     inter = a.intersected(b)
     if inter.isEmpty():
@@ -97,7 +97,7 @@ def drop_duplicate_regions(
     kept: list[Region] = []
     for region in regions:
         rect = region.image_path().boundingRect()
-        if any(_iou(rect, other) >= iou for other in bounds):
+        if any(bbox_iou(rect, other) >= iou for other in bounds):
             continue
         bounds.append(rect)
         kept.append(region)

@@ -10,3 +10,4 @@ sample.png
 /runtime/
 .pytest_cache/
 .superpowers/
+*.egg-info/

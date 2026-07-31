@@ -4,6 +4,7 @@ import os
 import pytest
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import (
+    QKeyEvent,
     QMouseEvent,
     QNativeGestureEvent,
     QPointingDevice,
@@ -156,6 +157,40 @@ def test_add_regions_with_empty_list_pushes_no_undo(qapp):
     assert canvas.get_regions() == []
 
 
+def test_delete_regions_removes_and_undoable(qapp):
+    canvas = _canvas_with_image(qapp)
+    region = _rect_region(0)
+    canvas.add_region(region)
+    fired = []
+    canvas.regions_changed.connect(lambda: fired.append(True))
+    canvas.delete_regions([region])
+    assert canvas.get_regions() == []
+    assert fired
+    canvas.undo()
+    assert len(canvas.get_regions()) == 1
+
+
+def test_delete_regions_ignores_unknown(qapp):
+    canvas = _canvas_with_image(qapp)
+    known = _rect_region(0)
+    canvas.add_region(known)
+    # 構造が同じでも別インスタンスは消さない
+    canvas.delete_regions([_rect_region(0)])
+    assert len(canvas.get_regions()) == 1
+
+
+def test_delete_key_removes_selected_region(qapp):
+    canvas = _canvas_with_image(qapp)
+    item = canvas.add_region(_rect_region(0))
+    item.setSelected(True)
+    canvas.keyPressEvent(
+        QKeyEvent(
+            QEvent.Type.KeyPress, Qt.Key.Key_Delete, Qt.KeyboardModifier.NoModifier
+        )
+    )
+    assert canvas.get_regions() == []
+
+
 def _press(canvas: MosaicCanvas, scene_pt: QPointF) -> None:
     """シーン座標を指定して左ボタンの押下を送る"""
     pos = QPointF(canvas.mapFromScene(scene_pt))
@@ -267,3 +302,96 @@ def test_pinch_in_zooms_out(qapp):
     before = canvas.transform().m11()
     _pinch(canvas, -0.2)
     assert canvas.transform().m11() < before
+
+
+class TestPlayback:
+    def _canvas(self):
+        QApplication.instance() or QApplication([])
+        canvas = MosaicCanvas()
+        canvas.set_image(Image.new("RGB", (100, 80), (10, 20, 30)))
+        return canvas
+
+    def _region(self) -> Region:
+        return Region(kind=RegionKind.RECT, rect=QRectF(0, 0, 10, 10))
+
+    def _proxy(self, width=50, height=40):
+        from PySide6.QtGui import QImage
+
+        image = QImage(width, height, QImage.Format.Format_RGB888)
+        image.fill(0x336699)
+        return image
+
+    def test_playback_image_keeps_the_scene_rect(self):
+        canvas = self._canvas()
+        before = canvas.sceneRect()
+        canvas.set_playback_image(self._proxy())
+        assert canvas.sceneRect() == before
+
+    def test_playback_image_keeps_the_zoom(self):
+        canvas = self._canvas()
+        canvas.scale(2.0, 2.0)
+        before = canvas.transform().m11()
+        canvas.set_playback_image(self._proxy())
+        assert canvas.transform().m11() == before
+
+    def test_playback_image_scales_the_proxy_to_the_image_size(self):
+        canvas = self._canvas()
+        canvas.set_playback_image(self._proxy(50, 40))
+        item = canvas._pixmap_item
+        # 50x40 のプロキシを 100x80 のシーン矩形へ伸ばす
+        assert item.pixmap().width() == 50
+        assert item.sceneBoundingRect().width() == 100
+
+    def test_set_image_resets_the_proxy_scaling(self):
+        canvas = self._canvas()
+        canvas.set_playback_image(self._proxy(50, 40))
+        canvas.set_image(Image.new("RGB", (100, 80)))
+        assert canvas._pixmap_item.transform().m11() == 1.0
+
+    def test_playback_image_refreshes_the_mosaic_without_preview_mode(self):
+        """プレビュー表示が OFF でも、再生フレームにモザイクが追従すること
+
+        差し替え前は静止フレームのモザイクが残り、範囲内が古い画像のまま
+        凍結して見える(回帰確認)。
+        """
+        canvas = self._canvas()
+        canvas.add_region(self._region(), push_undo=False)
+        before = canvas._overlay._mosaic_pixmap
+        canvas.set_playback_image(self._proxy())
+        after = canvas._overlay._mosaic_pixmap
+        assert after is not before
+        # プロキシ由来の縮小 pixmap で、原寸への引き伸ばしはオーバーレイ側が行う
+        assert after.width() <= 50
+
+    def test_playback_regions_add_and_remove_items(self):
+        canvas = self._canvas()
+        a, b = self._region(), self._region()
+        canvas.set_playback_regions([a, b])
+        assert len(canvas.get_regions()) == 2
+        canvas.set_playback_regions([a])
+        assert [id(r) for r in canvas.get_regions()] == [id(a)]
+        canvas.set_playback_regions([])
+        assert canvas.get_regions() == []
+
+    def test_playback_regions_do_not_mark_changed(self):
+        canvas = self._canvas()
+        fired = []
+        canvas.regions_changed.connect(lambda: fired.append(True))
+        canvas.set_playback_regions([self._region()])
+        assert fired == []
+
+    def test_playback_regions_are_not_undoable(self):
+        canvas = self._canvas()
+        canvas.set_playback_regions([self._region()])
+        assert canvas._undo_stack == []
+
+    def test_playback_mode_blocks_selection(self):
+        canvas = self._canvas()
+        region = self._region()
+        canvas.set_playback_regions([region])
+        canvas.set_playback_mode(True)
+        canvas.select_regions([region])
+        assert canvas.selected_regions() == []
+        canvas.set_playback_mode(False)
+        canvas.select_regions([region])
+        assert canvas.selected_regions() == [region]
