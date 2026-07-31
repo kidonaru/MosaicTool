@@ -15,10 +15,9 @@ from PySide6.QtCore import QThread, Signal
 
 from mosaic_tool.video import ffmpeg as video_ffmpeg
 from mosaic_tool.video.ffmpeg import VideoInfo
-
-# 停止時にスレッドの終了を待つ上限 (ms)。取り出し中のプロセスは kill するため
-# 通常は即座に終わる
-STOP_WAIT_MS = 2000
+# 停止時の待ち上限は再生スレッドと同じ値を使う (片方だけずれるのを防ぐ)。
+# 取り出し中のプロセスは kill するため通常は即座に終わる
+from mosaic_tool.video.player import STOP_WAIT_MS
 
 
 class FrameFetcher(QThread):
