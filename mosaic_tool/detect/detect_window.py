@@ -36,6 +36,11 @@ LOADING_TEXT = "モデルを読み込み中..."
 REFRESHING_TEXT = "モデルを更新中..."
 CLASS_TEXT = "クラス…"           # 未設定(全クラス)のときのボタン表示
 CLASS_LOADING_TEXT = "クラスを読み込み中..."
+README_MODEL_URL = (
+    "https://github.com/kidonaru/MosaicTool"
+    "#nsfw-%E6%A4%9C%E5%87%BA%E3%83%A2%E3%83%87%E3%83%AB"
+)
+README_LINK_TEXT = f'モデルの追加方法は<a href="{README_MODEL_URL}">README</a>を参考'
 NO_MODEL_TEXT = (
     "モデルがありません。セットアップすると標準モデルが取得されます。\n"
     "自分で用意した .pt は models フォルダへ置いて「更新」を押してください。"
@@ -104,6 +109,11 @@ class DetectWindow(QDialog):
         group = self._group
         group_layout = QVBoxLayout(group)
         header = QHBoxLayout()
+        # モデルの追加手順は README に集約しているため、そこへ誘導する
+        readme_label = QLabel(README_LINK_TEXT)
+        readme_label.setTextFormat(Qt.RichText)
+        readme_label.setOpenExternalLinks(True)
+        header.addWidget(readme_label)
         header.addStretch()
         open_button = QPushButton("フォルダを開く")
         open_button.clicked.connect(self._on_open_folder)
