@@ -16,7 +16,8 @@ import appinfo
 # 起動されるとリポジトリ直下が sys.path に入らないため、ここで通しておく
 sys.path.insert(0, str(appinfo.repo_root()))
 
-from mosaic_tool.io_utils import IMAGE_EXTS  # noqa: E402
+# ビルド用 Python には Pillow 等が入っていないため、依存を持たない定数モジュールから読む
+from mosaic_tool.file_types import IMAGE_EXTS  # noqa: E402
 
 
 def document_types() -> list[dict]:

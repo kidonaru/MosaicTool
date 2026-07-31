@@ -5,8 +5,8 @@ from pathlib import Path
 
 from PIL import Image, PngImagePlugin
 
-# 対応する画像拡張子
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+# 既存の参照元を壊さないよう、対応拡張子はここから再エクスポートする
+from mosaic_tool.file_types import IMAGE_EXTS  # noqa: F401
 
 
 def is_image_file(path: Path) -> bool:
