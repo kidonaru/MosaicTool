@@ -209,7 +209,8 @@ class TimelineArea(QWidget):
 
     # --- 座標変換とジオメトリ ---
 
-    def _x(self, frame: int) -> float:
+    def frame_x(self, frame: int) -> float:
+        """フレーム番号に対応する x 座標(スクロール追従のため親からも使う)"""
         return LABEL_W + frame * self._px_per_frame
 
     def _frame_at_raw(self, x: float) -> int:
@@ -225,9 +226,9 @@ class TimelineArea(QWidget):
         return RULER_H + ROW_GAP + lane_index * (ROW_H + ROW_GAP)
 
     def _bar_rect(self, lane_index: int, vr: VideoRegion) -> QRectF:
-        x1 = self._x(vr.start)
+        x1 = self.frame_x(vr.start)
         # 両端含みの区間なので終了フレームの右端まで塗る
-        x2 = self._x(vr.end + 1)
+        x2 = self.frame_x(vr.end + 1)
         return QRectF(x1, self._row_top(lane_index), max(3.0, x2 - x1), ROW_H)
 
     def sizeHint(self) -> QSize:  # noqa: N802 (Qt のオーバーライド)
@@ -404,6 +405,8 @@ class TimelineArea(QWidget):
 
         横移動やリサイズだけでも固定するのは、操作直後に自動配置でバーが
         別の行へ飛ぶのを防ぐため。押し出された区間は自動配置へ戻す。
+        処理は「掴んだ区間の行を固定 → 被った区間の固定を解除 → 行の再構成」
+        の 3 段階で進む。
         """
         if not items:
             return
@@ -559,7 +562,7 @@ class TimelineArea(QWidget):
             # ズーム前のカーソル位置(ビューポート座標)を保ったままスクロールし直す
             viewport_x = cursor_x - self._scroll_x
             self._zoom(ZOOM_STEP**notches)
-            self.scroll_requested.emit(int(self._x(frame) - viewport_x))
+            self.scroll_requested.emit(int(self.frame_x(frame) - viewport_x))
             event.accept()
             return
         # 横向きのホイールを持つデバイスでは x 側だけが動く
@@ -598,7 +601,7 @@ class TimelineArea(QWidget):
         last = self._frame_at(rect.right())
         painter.setPen(_TICK_COLOR)
         for frame in range(first, last + 1, minor):
-            x = int(self._x(frame))
+            x = int(self.frame_x(frame))
             is_major = frame % major == 0
             length = self.RULER_MAJOR_TICK if is_major else self.RULER_MINOR_TICK
             painter.drawLine(x, RULER_H - length, x, RULER_H)
@@ -627,7 +630,7 @@ class TimelineArea(QWidget):
         last = self._frame_at(rect.right())
         for frame in range(first, last + 1, minor):
             painter.setPen(_GRID_MAJOR if frame % major == 0 else _GRID_MINOR)
-            x = int(self._x(frame))
+            x = int(self.frame_x(frame))
             painter.drawLine(x, int(RULER_H), x, int(bottom))
 
     def _paint_bars(self, painter: QPainter, rect: QRectF) -> None:
@@ -692,7 +695,7 @@ class TimelineArea(QWidget):
         painter.drawRect(self._rubber_rect())
 
     def _paint_playhead(self, painter: QPainter) -> None:
-        x = self._x(self._frame)
+        x = self.frame_x(self._frame)
         painter.setPen(_PLAYHEAD_COLOR)
         painter.drawLine(int(x), 0, int(x), self.height())
 
@@ -848,7 +851,7 @@ class TimelineWindow(QWidget):
     def set_frame(self, frame: int) -> None:
         """再生ヘッドを移動し、可視範囲から外れたらスクロールで追従する"""
         self._area.set_frame(frame)
-        x = self._area._x(frame)
+        x = self._area.frame_x(frame)
         bar = self._scroll.horizontalScrollBar()
         view_w = self._scroll.viewport().width()
         if not (bar.value() + LABEL_W <= x <= bar.value() + view_w):
