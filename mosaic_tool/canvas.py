@@ -648,6 +648,20 @@ class MosaicCanvas(QGraphicsView):
         for item in self._region_items():
             item.setSelected(id(item.region) in targets)
 
+    def delete_regions(self, regions: list[Region]) -> None:
+        """指定した範囲(同一インスタンス)をシーンから削除する(Undo 可能)"""
+        targets = [
+            it for it in self._region_items()
+            if any(it.region is r for r in regions)
+        ]
+        if not targets:
+            return
+        for it in targets:
+            self._scene.removeItem(it)
+        # 参照を保持したままスタックへ(Undo で戻せるようにする)
+        self._undo_stack.append(("remove", targets))
+        self._refresh_overlay()
+
     def undo(self) -> None:
         """直前の操作(追加/削除/変形)を取り消す"""
         if not self._undo_stack:
@@ -704,15 +718,10 @@ class MosaicCanvas(QGraphicsView):
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
-            items = [
-                it for it in self._scene.selectedItems() if isinstance(it, RegionItem)
-            ]
-            if items:
-                for it in items:
-                    self._scene.removeItem(it)
-                # 参照を保持したままスタックへ(Undo で戻せるようにする)
-                self._undo_stack.append(("remove", items))
-                self._refresh_overlay()
+            self.delete_regions([
+                it.region for it in self._scene.selectedItems()
+                if isinstance(it, RegionItem)
+            ])
             event.accept()
             return
         if event.matches(QKeySequence.StandardKey.Undo):

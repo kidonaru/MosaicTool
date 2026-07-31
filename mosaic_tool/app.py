@@ -42,6 +42,7 @@ from mosaic_tool.video.merge import Detection, merge_detections, parse_detection
 from mosaic_tool.video.session import VideoSession
 from mosaic_tool.video.setup_dialog import VideoSetupDialog
 from mosaic_tool.video.timeline import TimelineBar
+from mosaic_tool.video.timeline_window import TimelineWindow
 
 TITLE = f"{APP_NAME} v{__version__}"
 BLOCK_STEP = 5      # モザイクサイズの刻み幅 (px)
@@ -99,12 +100,10 @@ class MainWindow(QMainWindow):
         self._timeline = TimelineBar(self)
         self._timeline.hide()
         self._timeline.frame_changed.connect(self._on_frame_changed)
-        self._timeline.interval_edited.connect(self._on_interval_edited)
-        self._timeline.interval_clicked.connect(self._on_interval_clicked)
         layout.addWidget(self._timeline)
         self.setCentralWidget(container)
         self.canvas.regions_changed.connect(self._on_regions_changed)
-        self.canvas.selection_changed.connect(self._update_selection_interval)
+        self.canvas.selection_changed.connect(self._update_timeline_window)
         self.statusBar().showMessage("画像ファイルまたはフォルダをドロップしてください")
 
         self._images: list[Path] = []          # 編集対象の画像リスト
@@ -131,7 +130,8 @@ class MainWindow(QMainWindow):
 
         # 動画モードの状態(None なら画像モード)
         self._video: VideoSession | None = None
-        self._video_displayed_ids: set[int] = set()  # 直近の表示に渡した Region の id
+        # 区間指定用のタイムラインウィンドウ(初回の動画で生成する)
+        self._timeline_window: TimelineWindow | None = None
         self._exporter: VideoExporter | None = None
         self._export_dialog: QProgressDialog | None = None
         # 動画への自動検出の実行状態(None なら未実行)
@@ -266,6 +266,12 @@ class MainWindow(QMainWindow):
         self._add_shortcut(self._detect_act, QKeySequence(Qt.Key.Key_D))
         self._detect_act.toggled.connect(self._on_detect_toggled)
         tb.addAction(self._detect_act)
+        # タイムライン: 動画の区間指定ウィンドウ。閉じてもここから開き直せる
+        self._timeline_act = QAction("タイムライン", self)
+        self._timeline_act.setToolTip("タイムラインウィンドウを表示する(動画モードのみ)")
+        self._timeline_act.triggered.connect(self._show_timeline_window)
+        self._timeline_act.setEnabled(False)
+        tb.addAction(self._timeline_act)
 
     def _on_block_changed(self, value: int) -> None:
         # 5px 刻みにスナップする
@@ -721,9 +727,10 @@ class MainWindow(QMainWindow):
         if self._video is None:
             return
         self._video = None
-        self._video_displayed_ids = set()
         self._timeline.hide()
-        self._timeline.set_intervals([], None)
+        self._timeline_act.setEnabled(False)
+        if self._timeline_window is not None:
+            self._timeline_window.hide()
 
     def _open_video(self, path: Path) -> None:
         """動画を開いて動画モードへ切り替える"""
@@ -748,6 +755,8 @@ class MainWindow(QMainWindow):
         self._timeline.set_frame(0)
         self._timeline.show()
         self._show_frame(0)
+        self._timeline_act.setEnabled(True)
+        self._show_timeline_window()
         self._dirty = False
         self._saved = False
         self.setWindowTitle(f"{TITLE} - {path.name}")
@@ -769,19 +778,11 @@ class MainWindow(QMainWindow):
         except (video_ffmpeg.VideoError, OSError) as e:
             QMessageBox.warning(self, "読み込みエラー", f"フレームを表示できません\n{e}")
             return
-        # 選択中の範囲は区間外のフレームでも表示・選択を保ち、
-        # シーク後に「開始←現在」「終了←現在」で区間を広げられるようにする
-        selected = [
-            r for r in self.canvas.selected_regions() if video.find(r) is not None
-        ]
+        # 表示するのはこのフレームに掛かる範囲だけ。区間外へ移動した範囲は
+        # 選択ごと外れる(区間の調整はタイムラインウィンドウで行う)
         video.frame = frame
         self._current_image = img
-        regions = video.regions_at(frame)
-        shown = {id(r) for r in regions}
-        regions += [r for r in selected if id(r) not in shown]
-        self._video_displayed_ids = {id(r) for r in regions}
-        self.canvas.set_image(img, regions)
-        self.canvas.select_regions(selected)
+        self.canvas.set_image(img, video.regions_at(frame))
         self.canvas.setFocus()
 
     def _on_frame_changed(self, frame: int) -> None:
@@ -791,54 +792,79 @@ class MainWindow(QMainWindow):
         # 表示中フレームでの編集を区間リストへ反映してから移動する
         self._sync_video_regions()
         self._show_frame(frame)
-        self._update_selection_interval()
+        self._update_timeline_window()
+        if self._timeline_window is not None:
+            self._timeline_window.set_frame(frame)
 
     def _sync_video_regions(self) -> None:
         if self._video is not None:
-            self._video.sync_from_canvas(
-                self.canvas.get_regions(), self._video_displayed_ids
-            )
+            self._video.sync_from_canvas(self.canvas.get_regions())
 
-    def _update_selection_interval(self) -> None:
-        """全範囲の区間と選択中の範囲をタイムラインの区間バーへ反映する"""
-        video = self._video
-        if video is None:
+    # --- タイムラインウィンドウ ---
+
+    def _ensure_timeline_window(self) -> TimelineWindow:
+        """タイムラインウィンドウを遅延生成して返す"""
+        if self._timeline_window is None:
+            window = TimelineWindow(self)
+            window.seek_requested.connect(self._timeline.seek)
+            window.interval_edited.connect(self._on_timeline_interval_edited)
+            window.region_clicked.connect(self._on_timeline_region_clicked)
+            window.delete_requested.connect(self._on_timeline_delete)
+            self._timeline_window = window
+        return self._timeline_window
+
+    def _show_timeline_window(self) -> None:
+        """タイムラインウィンドウを最新の内容で表示する(動画モードのみ)"""
+        if self._video is None:
+            return
+        window = self._ensure_timeline_window()
+        window.set_total(self._video.info.frame_count)
+        self._update_timeline_window()
+        window.set_frame(self._video.frame)
+        window.show()
+        window.raise_()
+
+    def _update_timeline_window(self) -> None:
+        """全区間と選択状態をタイムラインウィンドウへ反映する"""
+        if self._timeline_window is None or self._video is None:
             return
         selected = self.canvas.selected_regions()
-        vr = video.find(selected[0]) if len(selected) == 1 else None
-        index = video.regions.index(vr) if vr is not None else None
-        self._timeline.set_intervals(
-            [(v.start, v.end) for v in video.regions], index
+        self._timeline_window.set_data(
+            self._video.regions, selected[0] if len(selected) == 1 else None
         )
 
-    def _on_interval_edited(self, start: int, end: int) -> None:
-        """区間バーの端ドラッグを選択中の範囲の区間へ反映する"""
+    def _on_timeline_interval_edited(
+        self, region: Region, start: int, end: int
+    ) -> None:
+        """タイムラインの端ドラッグ・平行移動を区間へ反映する"""
         video = self._video
-        if video is None:
-            return
-        selected = self.canvas.selected_regions()
-        vr = video.find(selected[0]) if len(selected) == 1 else None
+        vr = video.find(region) if video is not None else None
         if vr is None:
             return
         vr.start, vr.end = start, end
         self._dirty = True
 
-    def _on_interval_clicked(self, index: int) -> None:
-        """区間バーの帯クリックで対応する範囲を選択する"""
+    def _on_timeline_region_clicked(self, region: Region, frame: int) -> None:
+        """タイムラインのバークリックでクリック位置へ移動し、その範囲を選択する"""
         video = self._video
-        if video is None or not (0 <= index < len(video.regions)):
+        if video is None or video.find(region) is None:
             return
-        vr = video.regions[index]
-        # 現在フレームに表示されていない範囲は表示に加えてから選択する
-        if id(vr.region) not in self._video_displayed_ids:
-            if self._current_image is None:
-                return
-            regions = video.regions_at(video.frame)
-            if not any(r is vr.region for r in regions):
-                regions.append(vr.region)
-            self._video_displayed_ids = {id(r) for r in regions}
-            self.canvas.set_image(self._current_image, regions)
-        self.canvas.select_regions([vr.region])
+        if frame != video.frame:
+            # シーク一式(区間の同期・フレーム表示・再生ヘッド)を通す
+            self._timeline.seek(frame)
+        self.canvas.select_regions([region])
+
+    def _on_timeline_delete(self, region: Region) -> None:
+        """タイムラインで選択中の範囲を削除する(区間リストからも外す)"""
+        video = self._video
+        vr = video.find(region) if video is not None else None
+        if vr is None:
+            return
+        # キャンバスに出ていれば Undo 可能な削除を通す(出ていなければ何もしない)
+        self.canvas.delete_regions([region])
+        video.regions = [v for v in video.regions if v is not vr]
+        self._dirty = True
+        self._update_timeline_window()
 
     # --- 動画の書き出し ---
 
@@ -983,7 +1009,7 @@ class MainWindow(QMainWindow):
             self._dirty = True
             # 表示中フレームに掛かる範囲が増えた可能性があるため描画し直す
             self._show_frame(self._video.frame)
-            self._update_selection_interval()
+            self._update_timeline_window()
         self._finish_video_detect(f"{added} 件の範囲を追加しました")
 
     def _finish_video_detect(self, message: str) -> None:
@@ -1011,7 +1037,7 @@ class MainWindow(QMainWindow):
         self._dirty = True
         if self._video is not None:
             self._sync_video_regions()
-            self._update_selection_interval()
+            self._update_timeline_window()
 
     def _confirm_discard(self, save_unedited: bool = False) -> bool:
         """未保存の変更があれば破棄してよいか確認する

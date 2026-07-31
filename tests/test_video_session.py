@@ -1,12 +1,13 @@
 """動画編集の状態(区間つき範囲とキャンバス同期)の検証"""
 from pathlib import Path
 
+import pytest
 from PySide6.QtCore import QRectF
 
 from mosaic_tool.regions import Region, RegionKind
 from mosaic_tool.video.ffmpeg import VideoInfo
 from mosaic_tool.video.merge import Interval
-from mosaic_tool.video.session import VideoRegion, VideoSession
+from mosaic_tool.video.session import RegionSource, VideoRegion, VideoSession
 
 
 def make_region():
@@ -16,6 +17,26 @@ def make_region():
 def make_session():
     info = VideoInfo(640, 480, 30.0, "30/1", 300, 10.0, None)
     return VideoSession(Path("movie.mp4"), info)
+
+
+class TestSource:
+    def test_source_derived_from_kind(self):
+        rect = Region(kind=RegionKind.RECT, rect=QRectF(0, 0, 10, 10))
+        stroke = Region(kind=RegionKind.STROKE, points=[], pen_width=10.0)
+        poly = Region(kind=RegionKind.POLYGON, points=[])
+        assert VideoRegion(rect, 0, 0).source is RegionSource.RECT
+        assert VideoRegion(stroke, 0, 0).source is RegionSource.PEN
+        assert VideoRegion(poly, 0, 0).source is RegionSource.AUTO
+
+    def test_add_intervals_marks_auto(self):
+        session = make_session()
+        session.add_intervals([Interval(0, 5, (0.0, 0.0, 10.0, 10.0))])
+        assert session.regions[0].source is RegionSource.AUTO
+
+    def test_explicit_source_kept(self):
+        rect = Region(kind=RegionKind.RECT, rect=QRectF(0, 0, 10, 10))
+        vr = VideoRegion(rect, 0, 0, source=RegionSource.AUTO)
+        assert vr.source is RegionSource.AUTO
 
 
 class TestRegionsAt:
@@ -54,23 +75,11 @@ class TestSyncFromCanvas:
         session.sync_from_canvas([])
         assert len(session.regions) == 1
 
-    def test_displayed_ghost_removed_when_deleted(self):
-        # 選択維持で区間外にも表示していた範囲は、消えたら削除とみなす
+    def test_no_displayed_ids_argument(self):
+        # 区間外の範囲は表示しない方式にしたため、表示中 id の受け渡しは不要
         session = make_session()
-        region = make_region()
-        session.regions = [VideoRegion(region, 0, 10)]
-        session.frame = 50
-        session.sync_from_canvas([], displayed_ids={id(region)})
-        assert session.regions == []
-
-    def test_undisplayed_region_kept_with_displayed_ids(self):
-        # 表示していなかった範囲は displayed_ids 指定時も消さない
-        session = make_session()
-        region = make_region()
-        session.regions = [VideoRegion(region, 0, 10)]
-        session.frame = 50
-        session.sync_from_canvas([], displayed_ids=set())
-        assert len(session.regions) == 1
+        with pytest.raises(TypeError):
+            session.sync_from_canvas([], displayed_ids=set())
 
     def test_known_region_not_duplicated(self):
         session = make_session()

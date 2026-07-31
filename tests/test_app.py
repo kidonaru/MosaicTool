@@ -1,9 +1,10 @@
 """MainWindow のプレビュー操作(Tab ショートカット・画像切替時の解除)の検証"""
+import io as std_io
 import os
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QRectF, QSettings, Qt
 from PySide6.QtGui import QKeySequence
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -16,7 +17,10 @@ from PySide6.QtWidgets import (  # noqa: E402
 from PIL import Image  # noqa: E402
 
 from mosaic_tool.app import PEN_STEP, THRESHOLD_STEP, MainWindow  # noqa: E402
+from mosaic_tool.regions import Region, RegionKind  # noqa: E402
 from mosaic_tool.settings import AppSettings  # noqa: E402
+from mosaic_tool.video.ffmpeg import VideoInfo  # noqa: E402
+from mosaic_tool.video.session import VideoRegion  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -68,6 +72,8 @@ def test_toolbar_actions_show_key_in_tooltip(window):
         "保存": f"保存 ({key_text(QKeySequence.StandardKey.Save)})",
         "プレビュー": f"プレビュー ({key_text(Qt.Key.Key_Tab)})",
         "自動検出": f"自動検出 ({key_text(Qt.Key.Key_D)})",
+        # ショートカットを持たないため説明文をそのまま出す
+        "タイムライン": "タイムラインウィンドウを表示する(動画モードのみ)",
     }
     tooltips = {
         act.text(): act.toolTip()
@@ -432,3 +438,116 @@ def test_setup_is_not_shown_when_the_runtime_is_ready(window, monkeypatch):
     window._detect_act.trigger()
     assert opened == []
     window._detect_window.close()
+
+
+@pytest.fixture
+def video(window, monkeypatch, tmp_path):
+    """ffmpeg をモックして動画モードへ入れる"""
+    info = VideoInfo(64, 48, 30.0, "30/1", 100, 3.3, None)
+    buf = std_io.BytesIO()
+    Image.new("RGB", (64, 48)).save(buf, "PNG")
+    monkeypatch.setattr(
+        "mosaic_tool.app.video_ffmpeg.is_ffmpeg_ready", lambda: True
+    )
+    monkeypatch.setattr("mosaic_tool.app.video_ffmpeg.probe", lambda p: info)
+    monkeypatch.setattr(
+        "mosaic_tool.app.video_ffmpeg.extract_frame",
+        lambda *a, **k: buf.getvalue(),
+    )
+    path = tmp_path / "movie.mp4"
+    path.write_bytes(b"")
+    window._open_video(path)
+    yield window
+    # 動画モードは自動保存の対象外のため、未保存のまま close() すると
+    # 破棄確認のモーダルダイアログでテストが止まる
+    window._dirty = False
+
+
+def _rect_region() -> Region:
+    return Region(kind=RegionKind.RECT, rect=QRectF(0, 0, 10, 10))
+
+
+class TestTimelineWindowIntegration:
+    def test_open_video_shows_timeline_window(self, video):
+        assert video._timeline_window is not None
+        assert video._timeline_window.isVisible()
+
+    def test_leave_video_hides_timeline_window(self, video):
+        video._leave_video_mode()
+        assert not video._timeline_window.isVisible()
+
+    def test_timeline_action_enabled_only_in_video_mode(self, window, video):
+        assert video._timeline_act.isEnabled()
+        video._leave_video_mode()
+        assert not video._timeline_act.isEnabled()
+
+    def test_timeline_action_reopens_the_window(self, video):
+        video._timeline_window.close()
+        video._timeline_act.trigger()
+        assert video._timeline_window.isVisible()
+
+    def test_seek_from_window_moves_bottom_bar(self, video):
+        video._timeline_window.seek_requested.emit(30)
+        assert video._timeline.frame() == 30
+        assert video._video.frame == 30
+
+    def test_frame_change_moves_playhead(self, video):
+        video._timeline.seek(20)
+        assert video._timeline_window._area._frame == 20
+
+    def test_interval_edit_marks_dirty(self, video):
+        region = _rect_region()
+        video.canvas.add_region(region)      # sync で現在フレームの区間になる
+        video._dirty = False
+        vr = video._video.find(region)
+        video._timeline_window.interval_edited.emit(region, 0, 50)
+        assert (vr.start, vr.end) == (0, 50)
+        assert video._dirty
+
+    def test_delete_from_window_removes_region(self, video):
+        region = _rect_region()
+        video.canvas.add_region(region)
+        video._timeline_window.delete_requested.emit(region)
+        assert video._video.find(region) is None
+        assert video.canvas.get_regions() == []
+
+    def test_delete_offscreen_region_removes_from_session(self, video):
+        # 現在フレーム(0)に掛からない範囲はキャンバスに無くても消せる
+        region = _rect_region()
+        video._video.regions.append(VideoRegion(region, 50, 60))
+        video._timeline_window.delete_requested.emit(region)
+        assert video._video.find(region) is None
+
+    def test_region_click_seeks_to_clicked_frame_and_selects(self, video):
+        region = _rect_region()
+        video.canvas.add_region(region)
+        video._video.find(region).end = 50
+        video._timeline.seek(0)
+        video._timeline_window.region_clicked.emit(region, 30)
+        assert video._video.frame == 30
+        assert video._timeline.frame() == 30
+        assert video.canvas.selected_regions() == [region]
+
+    def test_region_click_without_move_keeps_frame(self, video):
+        region = _rect_region()
+        video.canvas.add_region(region)
+        video._timeline_window.region_clicked.emit(region, 0)
+        assert video._video.frame == 0
+        assert video.canvas.selected_regions() == [region]
+
+    def test_selection_dropped_outside_interval(self, video):
+        # 区間外のフレームへ移動したら選択は解除され、範囲も表示しない
+        region = _rect_region()
+        video.canvas.add_region(region)      # 区間はフレーム 0 のみ
+        video.canvas.select_regions([region])
+        video._timeline.seek(10)
+        assert video.canvas.get_regions() == []
+        assert video.canvas.selected_regions() == []
+        # 区間そのものは残るので、戻れば再び表示される
+        assert video._video.find(region) is not None
+        video._timeline.seek(0)
+        assert video.canvas.get_regions() == [region]
+
+    def test_window_shows_all_intervals(self, video):
+        video.canvas.add_region(_rect_region())
+        assert len(video._timeline_window._area._rows) == 1

@@ -4,6 +4,7 @@ import os
 import pytest
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import (
+    QKeyEvent,
     QMouseEvent,
     QNativeGestureEvent,
     QPointingDevice,
@@ -153,6 +154,40 @@ def test_add_regions_with_empty_list_pushes_no_undo(qapp):
     canvas.add_regions([])
     canvas.undo()
     # 空追加は Undo を消費しないため、直前の追加が取り消される
+    assert canvas.get_regions() == []
+
+
+def test_delete_regions_removes_and_undoable(qapp):
+    canvas = _canvas_with_image(qapp)
+    region = _rect_region(0)
+    canvas.add_region(region)
+    fired = []
+    canvas.regions_changed.connect(lambda: fired.append(True))
+    canvas.delete_regions([region])
+    assert canvas.get_regions() == []
+    assert fired
+    canvas.undo()
+    assert len(canvas.get_regions()) == 1
+
+
+def test_delete_regions_ignores_unknown(qapp):
+    canvas = _canvas_with_image(qapp)
+    known = _rect_region(0)
+    canvas.add_region(known)
+    # 構造が同じでも別インスタンスは消さない
+    canvas.delete_regions([_rect_region(0)])
+    assert len(canvas.get_regions()) == 1
+
+
+def test_delete_key_removes_selected_region(qapp):
+    canvas = _canvas_with_image(qapp)
+    item = canvas.add_region(_rect_region(0))
+    item.setSelected(True)
+    canvas.keyPressEvent(
+        QKeyEvent(
+            QEvent.Type.KeyPress, Qt.Key.Key_Delete, Qt.KeyboardModifier.NoModifier
+        )
+    )
     assert canvas.get_regions() == []
 
 

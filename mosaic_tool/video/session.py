@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF
@@ -17,6 +18,23 @@ from mosaic_tool.video.ffmpeg import VideoInfo
 from mosaic_tool.video.merge import Interval
 
 
+class RegionSource(Enum):
+    """範囲の由来。タイムラインの行分類に使う"""
+
+    PEN = "pen"
+    RECT = "rect"
+    AUTO = "auto"
+
+
+# RegionKind からカテゴリ由来を導く対応。手描きの多角形は存在しないため
+# POLYGON は自動検出とみなす
+_SOURCE_BY_KIND = {
+    RegionKind.STROKE: RegionSource.PEN,
+    RegionKind.RECT: RegionSource.RECT,
+    RegionKind.POLYGON: RegionSource.AUTO,
+}
+
+
 @dataclass
 class VideoRegion:
     """モザイク範囲 1 個と適用区間(両端のフレームを含む)"""
@@ -24,6 +42,12 @@ class VideoRegion:
     region: Region
     start: int
     end: int
+    # タイムラインの行分類。省略時は形状から導出する
+    source: RegionSource | None = None
+
+    def __post_init__(self) -> None:
+        if self.source is None:
+            self.source = _SOURCE_BY_KIND[self.region.kind]
 
     def covers(self, frame: int) -> bool:
         return self.start <= frame <= self.end
@@ -51,15 +75,11 @@ class VideoSession:
         """キャンバス上の Region から区間エントリを引く(同一インスタンス比較)"""
         return next((vr for vr in self.regions if vr.region is region), None)
 
-    def sync_from_canvas(
-        self, canvas_regions: list[Region], displayed_ids: set[int] | None = None
-    ) -> None:
+    def sync_from_canvas(self, canvas_regions: list[Region]) -> None:
         """表示中フレームのキャンバス内容を区間リストへ反映する
 
         キャンバスに現れた未知の範囲は現在フレームのみの区間として追加し、
-        表示していたはずなのに消えた範囲は削除されたとみなす。
-        displayed_ids は表示時に渡した Region の id 集合(選択維持で区間外も
-        表示するため)。省略時は現在フレームに掛かる範囲を表示扱いにする。
+        現在フレームに掛かるのにキャンバスから消えた範囲は削除されたとみなす。
         """
         known = {id(vr.region) for vr in self.regions}
         shown = {id(r) for r in canvas_regions}
@@ -68,11 +88,7 @@ class VideoSession:
                 self.regions.append(VideoRegion(region, self.frame, self.frame))
         self.regions = [
             vr for vr in self.regions
-            if id(vr.region) in shown
-            or not (
-                vr.covers(self.frame)
-                or (displayed_ids is not None and id(vr.region) in displayed_ids)
-            )
+            if id(vr.region) in shown or not vr.covers(self.frame)
         ]
 
     def set_start(self, region: Region, frame: int) -> bool:
@@ -100,7 +116,12 @@ class VideoSession:
         """
         for iv in intervals:
             self.regions.append(
-                VideoRegion(_interval_region(iv, self.info), iv.start, iv.end)
+                VideoRegion(
+                    _interval_region(iv, self.info),
+                    iv.start,
+                    iv.end,
+                    source=RegionSource.AUTO,
+                )
             )
         return len(intervals)
 
