@@ -6,7 +6,12 @@ from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QScrollArea, QVBoxLayout, QWidget
 
 from mosaic_tool.regions import Region
-from mosaic_tool.video.lanes import CATEGORY_LABELS, TimelineLane, build_rows
+from mosaic_tool.video.lanes import (
+    CATEGORY_LABELS,
+    TimelineLane,
+    build_rows,
+    clamp_lane_delta,
+)
 from mosaic_tool.video.session import VideoRegion
 from mosaic_tool.video.timeline_selection import (
     END,
@@ -105,7 +110,6 @@ class TimelineArea(QWidget):
 
     seek_requested = Signal(int)              # ルーラーのクリック/ドラッグ
     intervals_edited = Signal()               # 区間が変わった(ドラッグ中に逐次)
-    region_clicked = Signal(object, int)      # (Region, クリック位置のフレーム)
     delete_requested = Signal(list)           # ([Region]) 選択中バーの削除要求
     selection_changed = Signal(list)          # 選択が変わった([Region])
     scroll_requested = Signal(int)            # ズーム時のアンカー補正スクロール量
@@ -121,6 +125,8 @@ class TimelineArea(QWidget):
         self._total = 0
         self._frame = 0
         self._rows: list[TimelineLane] = []
+        # ドラッグ中に行を組み直すため、受け取った区間そのものを持つ
+        self._regions: list[VideoRegion] = []
         self._selection = TimelineSelection()
         self._px_per_frame = 2.0
         self._scroll_x = 0  # ラベル列の固定表示に使う水平スクロール量
@@ -142,8 +148,13 @@ class TimelineArea(QWidget):
 
     def set_data(self, regions: list[VideoRegion]) -> None:
         """区間一覧を反映し、行構成を作り直す(消えた区間は選択から落とす)"""
-        self._rows = build_rows(regions)
+        self._regions = list(regions)
         self._selection.prune(regions)
+        self._rebuild_rows()
+
+    def _rebuild_rows(self) -> None:
+        """保持している区間から行構成を作り直して描き直す"""
+        self._rows = build_rows(self._regions)
         self._apply_size()
 
     def set_selection(self, regions: list[Region]) -> None:
@@ -224,6 +235,44 @@ class TimelineArea(QWidget):
                 return i
         return None
 
+    def _row_at_nearest(self, y: float) -> int:
+        """縦ドラッグ用に、y へ最も近い行 index を返す
+
+        行間の余白でも落とし先が決まるよう丸める。末尾は行数そのものまで許し、
+        一番下へ払ったときに新しい行を作れるようにする。
+        """
+        raw = int((y - RULER_H - ROW_GAP) // (ROW_H + ROW_GAP))
+        return max(0, min(len(self._rows), raw))
+
+    def _row_index_of(self, vr: VideoRegion) -> int:
+        """その区間が載っている行 index"""
+        for i, row in enumerate(self._rows):
+            if any(v is vr for v in row.items):
+                return i
+        return 0
+
+    def _category_span(self, source) -> tuple[int, int]:
+        """カテゴリの先頭行 index と行数"""
+        rows = [i for i, row in enumerate(self._rows) if row.source is source]
+        return (rows[0], len(rows)) if rows else (0, 0)
+
+    def _lane_of(self, vr: VideoRegion) -> int:
+        """カテゴリ内のレーン番号(行 index からカテゴリの先頭分を引く)"""
+        return self._row_index_of(vr) - self._category_span(vr.source)[0]
+
+    def _hit_order(self, row_index: int) -> list[VideoRegion]:
+        """当たり判定の走査順
+
+        選択中のバーを先に見る。横に並んだバーの端が判定幅の中で競合しても、
+        いま掴もうとしている選択中の端が勝つようにする。各群の中では後に
+        描いたものを優先する(見えている方を掴む)。
+        """
+        items = list(reversed(self._rows[row_index].items))
+        selected = [vr for vr in items if self._selection.contains(vr)]
+        return selected + [
+            vr for vr in items if not self._selection.contains(vr)
+        ]
+
     def _edge_at(self, pos: QPointF) -> tuple[VideoRegion, str] | None:
         """バーの端 (±HANDLE_PX) をつかんでいればどちらの端かを返す
 
@@ -233,7 +282,7 @@ class TimelineArea(QWidget):
         row_index = self._row_at(pos.y())
         if row_index is None:
             return None
-        for vr in reversed(self._rows[row_index].items):
+        for vr in self._hit_order(row_index):
             bar = self._bar_rect(row_index, vr)
             d_start = abs(pos.x() - bar.left())
             d_end = abs(pos.x() - bar.right())
@@ -246,11 +295,11 @@ class TimelineArea(QWidget):
         return None
 
     def _bar_at(self, pos: QPointF) -> VideoRegion | None:
-        """座標に掛かる区間バーを返す(後に描いたものを優先)"""
+        """座標に掛かる区間バーを返す(選択中を優先し、次に後に描いたもの)"""
         row_index = self._row_at(pos.y())
         if row_index is None:
             return None
-        for vr in reversed(self._rows[row_index].items):
+        for vr in self._hit_order(row_index):
             if self._bar_rect(row_index, vr).contains(pos):
                 return vr
         return None
@@ -287,37 +336,56 @@ class TimelineArea(QWidget):
             self._begin_rubber(pos, additive=False)
             return
         self._begin_edit(MOVE, vr, pos)
-        self.region_clicked.emit(vr.region, self._frame_at(pos.x()))
 
     def mouseMoveEvent(self, event) -> None:
         if self._drag is None:
             self._update_cursor(event.position())
             return
         kind, anchor = self._drag
-        x = event.position().x()
+        pos = event.position()
         if kind == "seek":
-            self.seek_requested.emit(self._frame_at(x))
+            self.seek_requested.emit(self._frame_at(pos.x()))
             return
         if kind == RUBBER:
-            self._rubber_end = event.position()
+            self._rubber_end = pos
             self._apply_rubber()
             self.update()
             return
         delta = clamp_delta(
             self._drag_items,
             kind,
-            self._desired_delta(kind, anchor, x),
+            self._desired_delta(kind, anchor, pos.x()),
             self._max_frame(),
         )
-        if delta == 0:
+        moved = delta != 0
+        if moved:
+            apply_delta(self._drag_items, kind, delta)
+        # 平行移動のときだけ行もつかんで動かす(端の伸縮は横方向だけ)
+        if kind == MOVE and self._apply_lane_drag(pos.y(), anchor):
+            moved = True
+        if not moved:
             return
-        apply_delta(self._drag_items, kind, delta)
         self.update()
         self.intervals_edited.emit()
 
     def mouseReleaseEvent(self, event) -> None:
+        if self._drag is not None and self._drag[0] in (MOVE, START, END):
+            self._fix_lanes(self._drag_items)
         self._drag = None
         self._drag_items = []
+
+    def _fix_lanes(self, items: list[VideoRegion]) -> None:
+        """手を離した時点の行を手動指定として固定する
+
+        横移動やリサイズだけでも固定するのは、操作直後に自動配置でバーが
+        別の行へ飛ぶのを防ぐため。押し出された区間は自動配置へ戻す。
+        """
+        if not items:
+            return
+        for vr in items:
+            vr.lane = self._lane_of(vr)
+        self._claim_lanes(items)
+        self._rebuild_rows()
 
     def _begin_rubber(self, pos: QPointF, additive: bool) -> None:
         """空白からのドラッグで矩形選択を始める
@@ -382,6 +450,40 @@ class TimelineArea(QWidget):
         # 終了側は「バーの右端」をつかむため、境界の 1 つ手前が終了フレーム
         return frame - 1 - anchor.end
 
+    def _apply_lane_drag(self, y: float, anchor: VideoRegion) -> bool:
+        """縦ドラッグを選択全体の行移動へ変える(動かせたら True)"""
+        items = self._drag_items
+        lanes = [self._lane_of(vr) for vr in items]
+        limits = [self._category_span(vr.source)[1] for vr in items]
+        start, _ = self._category_span(anchor.source)
+        wanted = self._row_at_nearest(y) - start - self._lane_of(anchor)
+        delta = clamp_lane_delta(lanes, limits, wanted)
+        if delta == 0:
+            return False
+        for vr, lane in zip(items, lanes):
+            vr.lane = lane + delta
+        self._claim_lanes(items)
+        self._rebuild_rows()
+        return True
+
+    def _claim_lanes(self, items: list[VideoRegion]) -> None:
+        """掴んでいる区間が取った行から、被る他区間の手動指定を外す
+
+        後から来た操作を優先し、押し出された側は自動配置へ戻す。
+        """
+        moving = {id(vr) for vr in items}
+        for vr in self._regions:
+            if id(vr) in moving or vr.lane is None:
+                continue
+            if any(
+                other.source is vr.source
+                and other.lane == vr.lane
+                and other.start <= vr.end
+                and vr.start <= other.end
+                for other in items
+            ):
+                vr.lane = None
+
     def _update_cursor(self, pos: QPointF) -> None:
         """カーソル位置に応じて形状を変え、できる操作を示す"""
         if pos.y() < RULER_H:
@@ -434,8 +536,8 @@ class TimelineArea(QWidget):
         if delta == 0:
             super().wheelEvent(event)
             return
-        # 上回転(正)で左へ進めるため符号を反転する
-        self.hscroll_requested.emit(-delta)
+        # 上回転(正)で右へ進める(縦スクロールとは逆向きにして時間軸を送る感覚に合わせる)
+        self.hscroll_requested.emit(delta)
         event.accept()
 
     # --- 描画 ---
@@ -589,10 +691,10 @@ class TimelineWindow(QWidget):
     # TimelineArea の同名シグナルをそのまま中継する
     seek_requested = Signal(int)
     intervals_edited = Signal()
-    region_clicked = Signal(object, int)
     delete_requested = Signal(list)
     selection_changed = Signal(list)
     playback_toggle_requested = Signal()
+    closed = Signal()  # × で閉じられた(ツールバーのトグルを戻すため)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -620,7 +722,6 @@ class TimelineWindow(QWidget):
         )
         self._area.seek_requested.connect(self.seek_requested)
         self._area.intervals_edited.connect(self.intervals_edited)
-        self._area.region_clicked.connect(self.region_clicked)
         self._area.delete_requested.connect(self.delete_requested)
         self._area.selection_changed.connect(self.selection_changed)
         self._area.scroll_requested.connect(self._scroll_to)
@@ -629,6 +730,10 @@ class TimelineWindow(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._scroll)
+
+    def closeEvent(self, event) -> None:  # noqa: N802 (Qt のオーバーライド)
+        self.closed.emit()
+        super().closeEvent(event)
 
     def _scroll_to(self, x: int) -> None:
         """ズームのアンカー補正(カーソル下のフレームを画面上に留める)"""

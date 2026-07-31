@@ -50,7 +50,7 @@ from mosaic_tool.video.timeline_window import TimelineWindow
 
 TITLE = f"{APP_NAME} v{__version__}"
 # シークが止まってから原寸フレームへ描き直すまでの待ち (ms)
-SEEK_SETTLE_MS = 200
+SEEK_SETTLE_MS = 80
 BLOCK_STEP = 5      # モザイクサイズの刻み幅 (px)
 BLOCK_MAX = 100     # モザイクサイズの上限 (px)
 BLOCK_SLIDER_WIDTH = 100  # モザイクサイズのスライダー幅 (px)
@@ -299,8 +299,9 @@ class MainWindow(QMainWindow):
         tb.addAction(self._detect_act)
         # タイムライン: 動画の区間指定ウィンドウ。閉じてもここから開き直せる
         self._timeline_act = QAction("タイムライン", self)
+        self._timeline_act.setCheckable(True)
         self._timeline_act.setToolTip("タイムラインウィンドウを表示する(動画モードのみ)")
-        self._timeline_act.triggered.connect(self._show_timeline_window)
+        self._timeline_act.toggled.connect(self._on_timeline_toggled)
         self._timeline_act.setEnabled(False)
         tb.addAction(self._timeline_act)
 
@@ -770,9 +771,9 @@ class MainWindow(QMainWindow):
             self._scrubber = None
         self._video = None
         self._timeline.hide()
+        # トグルを戻すとウィンドウも閉じる(状態を合わせてから操作を塞ぐ)
+        self._timeline_act.setChecked(False)
         self._timeline_act.setEnabled(False)
-        if self._timeline_window is not None:
-            self._timeline_window.hide()
 
     def _open_video(self, path: Path) -> None:
         """動画を開いて動画モードへ切り替える"""
@@ -799,7 +800,8 @@ class MainWindow(QMainWindow):
         self._player = None
         self._show_frame(0)
         self._timeline_act.setEnabled(True)
-        self._show_timeline_window()
+        # _leave_video_mode でトグルは戻っているため、ここで必ず開き直しが走る
+        self._timeline_act.setChecked(True)
         self._dirty = False
         self._saved = False
         self.setWindowTitle(f"{TITLE} - {path.name}")
@@ -1002,12 +1004,25 @@ class MainWindow(QMainWindow):
             window = TimelineWindow(self)
             window.seek_requested.connect(self._timeline.seek)
             window.intervals_edited.connect(self._on_timeline_intervals_edited)
-            window.region_clicked.connect(self._on_timeline_region_clicked)
             window.delete_requested.connect(self._on_timeline_delete)
             window.selection_changed.connect(self._on_timeline_selection_changed)
             window.playback_toggle_requested.connect(self._toggle_playback)
+            # ウィンドウ側の × で閉じたときもトグルを戻す
+            window.closed.connect(self._sync_timeline_act)
             self._timeline_window = window
         return self._timeline_window
+
+    def _on_timeline_toggled(self, checked: bool) -> None:
+        """ツールバーのトグルに合わせてタイムラインウィンドウを開閉する"""
+        if not checked:
+            if self._timeline_window is not None:
+                self._timeline_window.hide()
+            return
+        self._show_timeline_window()
+
+    def _sync_timeline_act(self) -> None:
+        """ウィンドウが閉じられたらトグルの状態を合わせる"""
+        self._timeline_act.setChecked(False)
 
     def _show_timeline_window(self) -> None:
         """タイムラインウィンドウを最新の内容で表示する(動画モードのみ)"""
@@ -1062,16 +1077,6 @@ class MainWindow(QMainWindow):
             return
         self._dirty = True
         self.canvas.set_playback_regions(video.regions_at(video.frame))
-
-    def _on_timeline_region_clicked(self, region: Region, frame: int) -> None:
-        """タイムラインのバークリックでクリック位置へ移動し、その範囲を選択する"""
-        video = self._video
-        if video is None or video.find(region) is None:
-            return
-        if frame != video.frame:
-            # シーク一式(区間の同期・フレーム表示・再生ヘッド)を通す
-            self._timeline.seek(frame)
-        self.canvas.select_regions([region])
 
     def _on_timeline_delete(self, regions: list) -> None:
         """タイムラインで選択中の範囲をまとめて削除する(区間リストからも外す)"""

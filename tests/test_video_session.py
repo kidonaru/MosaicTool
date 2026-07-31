@@ -137,3 +137,11 @@ class TestAddIntervals:
         vr = session.regions[0]
         assert vr.region.kind == RegionKind.POLYGON
         assert vr.region.image_path().boundingRect() == QRectF(0, 0, 100, 100)
+
+
+class TestVideoRegionLane:
+    def test_lane_defaults_to_none(self):
+        assert VideoRegion(make_region(), 0, 5).lane is None
+
+    def test_lane_can_be_set(self):
+        assert VideoRegion(make_region(), 0, 5, lane=2).lane == 2

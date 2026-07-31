@@ -38,12 +38,6 @@ class TimelineBar(QWidget):
         self._prev_btn.setFixedWidth(28)
         self._prev_btn.clicked.connect(lambda: self.step(-1))
         layout.addWidget(self._prev_btn)
-        # 再生ボタンは Space のショートカットと二重に効かないようフォーカスを持たせない
-        self._play_btn = QPushButton(PLAY_TEXT)
-        self._play_btn.setFixedWidth(28)
-        self._play_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._play_btn.clicked.connect(self.play_clicked)
-        layout.addWidget(self._play_btn)
         self._slider = QSlider(Qt.Orientation.Horizontal)
         self._slider.setRange(0, 0)
         self._slider.valueChanged.connect(self.frame_changed)
@@ -55,6 +49,12 @@ class TimelineBar(QWidget):
         layout.addWidget(self._next_btn)
         self._frame_label = QLabel(" 0 / 0 ")
         layout.addWidget(self._frame_label)
+        # 再生ボタンは Space のショートカットと二重に効かないようフォーカスを持たせない
+        self._play_btn = QPushButton(PLAY_TEXT)
+        self._play_btn.setFixedWidth(28)
+        self._play_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._play_btn.clicked.connect(self.play_clicked)
+        layout.addWidget(self._play_btn)
         layout.addWidget(QLabel(" 速度 "))
         self._speed_combo = QComboBox()
         for speed in SPEEDS:

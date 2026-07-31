@@ -585,23 +585,6 @@ class TestTimelineWindowIntegration:
         assert video._video.regions == []
         assert video.canvas.get_regions() == []
 
-    def test_region_click_seeks_to_clicked_frame_and_selects(self, video):
-        region = _rect_region()
-        video.canvas.add_region(region)
-        video._video.find(region).end = 50
-        video._timeline.seek(0)
-        video._timeline_window.region_clicked.emit(region, 30)
-        assert video._video.frame == 30
-        assert video._timeline.frame() == 30
-        assert video.canvas.selected_regions() == [region]
-
-    def test_region_click_without_move_keeps_frame(self, video):
-        region = _rect_region()
-        video.canvas.add_region(region)
-        video._timeline_window.region_clicked.emit(region, 0)
-        assert video._video.frame == 0
-        assert video.canvas.selected_regions() == [region]
-
     def test_selection_dropped_outside_interval(self, video):
         # 区間外のフレームへ移動したら選択は解除され、範囲も表示しない
         region = _rect_region()

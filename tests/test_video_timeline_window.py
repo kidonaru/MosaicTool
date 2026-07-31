@@ -291,15 +291,15 @@ class TestWheel:
         fired = []
         area.hscroll_requested.connect(fired.append)
         self._wheel(area, area._x(10), 1, Qt.KeyboardModifier.NoModifier)
-        # ホイール上回転で左へ(加算量は負)
-        assert fired == [-120]
+        # ホイール上回転で右へ(加算量は正)
+        assert fired == [120]
 
-    def test_wheel_down_scrolls_right(self):
+    def test_wheel_down_scrolls_left(self):
         area = make_area()
         fired = []
         area.hscroll_requested.connect(fired.append)
         self._wheel(area, area._x(10), -1, Qt.KeyboardModifier.NoModifier)
-        assert fired == [120]
+        assert fired == [-120]
 
     def test_ctrl_wheel_does_not_scroll_horizontally(self):
         area = make_area()
@@ -372,21 +372,14 @@ class TestWindow:
         window = TimelineWindow()
         fired = []
         window.seek_requested.connect(lambda f: fired.append(("seek", f)))
-        window.region_clicked.connect(
-            lambda r, f: fired.append(("click", r, f))
-        )
         window.delete_requested.connect(lambda rs: fired.append(("delete", rs)))
         window.intervals_edited.connect(lambda: fired.append(("edit",)))
         window.selection_changed.connect(lambda rs: fired.append(("sel", rs)))
         window._area.seek_requested.emit(3)
-        window._area.region_clicked.emit(None, 7)
         window._area.delete_requested.emit([])
         window._area.intervals_edited.emit()
         window._area.selection_changed.emit([])
-        assert fired == [
-            ("seek", 3), ("click", None, 7), ("delete", []), ("edit",),
-            ("sel", []),
-        ]
+        assert fired == [("seek", 3), ("delete", []), ("edit",), ("sel", [])]
 
 
 class TestSelectionOwnership:
@@ -473,6 +466,36 @@ class TestHit:
         y = area._row_top(0) + 5
         assert area._bar_at(QPointF(area._x(15), y)) is item
         assert area._bar_at(QPointF(area._x(50), y)) is None
+
+    def test_edge_at_prefers_the_selected_bar(self):
+        # 端どうしが接して並ぶ 2 本(同じ行に載る)。選択中の a の終端が
+        # b の始端に勝つ
+        area = make_area(ppf=2.0)
+        a, b = vr(0, 9), vr(10, 19)
+        area.set_data([a, b])
+        area.set_selection([a.region])
+        y = area._row_top(0) + 5
+        assert area._edge_at(QPointF(area._x(10), y)) == (a, "end")
+
+    def test_edge_at_falls_back_to_unselected(self):
+        # 選択中のバーが遠ければ、非選択のバーの端を拾う
+        area = make_area(ppf=2.0)
+        a, b = vr(0, 9), vr(40, 49)
+        area.set_data([a, b])
+        area.set_selection([a.region])
+        y = area._row_top(0) + 5
+        assert area._edge_at(QPointF(area._x(40), y)) == (b, "start")
+
+    def test_bar_at_prefers_the_selected_bar(self):
+        # 重なる 2 本は通常は別の行へ分かれるため、走査順だけを見るために
+        # 同じ行へ強制的に載せる。選択中の b が勝つ
+        area = make_area(ppf=2.0)
+        a, b = vr(0, 20), vr(5, 15)
+        area.set_data([a, b])
+        area._rows[0].items[:] = [a, b]
+        area.set_selection([b.region])
+        y = area._row_top(0) + 5
+        assert area._bar_at(QPointF(area._x(10), y)) is b
 
 
 class TestDrag:
@@ -769,14 +792,20 @@ class TestRubberBand:
 
 
 class TestClickAndSeek:
-    def test_bar_click_emits_region_with_clicked_frame(self):
+    def test_area_has_no_region_clicked_signal(self):
+        # バークリックでの自動シークをやめたので、この経路自体を残さない
+        assert not hasattr(make_area(ppf=2.0), "region_clicked")
+
+    def test_bar_press_does_not_seek(self):
+        # バーを掴んでも再生位置は動かさない(シークはルーラーだけ)
         area = make_area(ppf=2.0)
         item = vr(10, 20)
         area.set_data([item])
         fired = []
-        area.region_clicked.connect(lambda r, f: fired.append((r, f)))
+        area.seek_requested.connect(fired.append)
         press(area, area._x(15), area._row_top(0) + 5)
-        assert fired == [(item.region, 15)]
+        assert fired == []
+        assert area._selection.items() == [item]
 
     def test_ruler_press_and_drag_seeks(self):
         area = make_area(ppf=2.0)
@@ -925,3 +954,119 @@ def test_space_requests_playback_toggle():
         )
     )
     assert fired == [True]
+
+
+class TestLaneDrag:
+    def _row_y(self, area, row_index):
+        return area._row_top(row_index) + ROW_H / 2
+
+    def test_drag_down_moves_to_next_row(self):
+        # 同じ行に並ぶ 2 本。a を 1 行下へ落とす
+        area = make_area(ppf=2.0)
+        a, b = vr(0, 9), vr(20, 29)
+        area.set_data([a, b])
+        assert len(area._rows) == 1
+        press(area, area._x(5), self._row_y(area, 0))
+        move(area, area._x(5), self._row_y(area, 1))
+        assert a.lane == 1
+        assert area._row_index_of(a) == 1
+        # 横位置は変わらない
+        assert (a.start, a.end) == (0, 9)
+
+    def test_drag_up_clamped_at_top_row(self):
+        area = make_area(ppf=2.0)
+        item = vr(0, 9)
+        area.set_data([item])
+        press(area, area._x(5), self._row_y(area, 0))
+        move(area, area._x(5), area._row_top(0) - 100)
+        assert item.lane in (None, 0)
+        assert area._row_index_of(item) == 0
+
+    def test_drag_cannot_leave_its_category(self):
+        # ペン 1 本と矩形 1 本。ペンを下へ払っても矩形の行へは入らない
+        area = make_area(ppf=2.0)
+        pen = vr(0, 9, RegionKind.STROKE)
+        rect = vr(0, 9, RegionKind.RECT)
+        area.set_data([pen, rect])
+        assert [row.source for row in area._rows] == [
+            RegionSource.PEN, RegionSource.RECT,
+        ]
+        press(area, area._x(5), self._row_y(area, 0))
+        move(area, area._x(5), self._row_y(area, 1))
+        # ペンのカテゴリ内で末尾 +1 の新規行まで(lane1)しか下がらない
+        assert pen.lane == 1
+        assert pen.source is RegionSource.PEN
+        assert area._rows[area._row_index_of(pen)].source is RegionSource.PEN
+
+    def test_multi_selection_moves_together(self):
+        # 同じ行の 2 本をまとめて 1 行下へ
+        area = make_area(ppf=2.0)
+        a, b = vr(0, 9), vr(20, 29)
+        area.set_data([a, b])
+        area.set_selection([a.region, b.region])
+        press(area, area._x(5), self._row_y(area, 0))
+        move(area, area._x(5), self._row_y(area, 1))
+        assert (a.lane, b.lane) == (1, 1)
+
+    def test_drag_pushes_the_resident_back_to_auto(self):
+        # lane1 に手動で置いた b の位置へ a を落とすと、b が自動配置へ戻る
+        area = make_area(ppf=2.0)
+        a, b = vr(0, 9), vr(0, 9)
+        b.lane = 1
+        area.set_data([a, b])
+        press(area, area._x(5), self._row_y(area, 0))
+        move(area, area._x(5), self._row_y(area, 1))
+        assert a.lane == 1
+        assert b.lane is None
+        assert area._row_index_of(a) == 1
+        assert area._row_index_of(b) == 0
+
+    def _release(self, area):
+        area.mouseReleaseEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonRelease, QPointF(0, 0), QPointF(0, 0),
+                Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+
+    def test_horizontal_drag_fixes_the_lane(self):
+        # 横へ動かしただけでも、手を離した時点の行が手動指定になる
+        area = make_area(ppf=2.0)
+        a, b = vr(0, 9), vr(20, 29)
+        area.set_data([a, b])
+        press(area, area._x(5), self._row_y(area, 0))
+        move(area, area._x(10), self._row_y(area, 0))
+        self._release(area)
+        assert a.lane == 0
+
+    def test_edge_drag_fixes_the_lane(self):
+        area = make_area(ppf=2.0)
+        item = vr(10, 20)
+        area.set_data([item])
+        press(area, area._x(21), self._row_y(area, 0))
+        move(area, area._x(31), self._row_y(area, 0))
+        self._release(area)
+        assert item.lane == 0
+        assert (item.start, item.end) == (10, 30)
+
+    def test_fixed_lane_pushes_the_resident_back_to_auto(self):
+        # b が手動で lane0。a を b に重なる位置まで伸ばして離すと b が自動へ戻る
+        area = make_area(ppf=2.0)
+        a, b = vr(0, 9), vr(20, 29)
+        b.lane = 0
+        area.set_data([a, b])
+        press(area, area._x(10), self._row_y(area, 0))   # a の終端をつかむ
+        move(area, area._x(26), self._row_y(area, 0))    # b に重なるまで伸ばす
+        self._release(area)
+        assert a.lane == 0
+        assert b.lane is None
+        assert area._row_index_of(a) != area._row_index_of(b)
+
+    def test_release_without_drag_items_is_safe(self):
+        # 矩形選択やシークで離しても落ちない
+        area = make_area(ppf=2.0)
+        area.set_data([vr(0, 9)])
+        press(area, area._x(50), self._row_y(area, 0))   # 空白から矩形選択
+        self._release(area)
+        assert area._drag is None

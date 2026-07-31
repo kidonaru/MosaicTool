@@ -44,6 +44,8 @@ class VideoRegion:
     end: int
     # タイムラインの行分類。省略時は形状から導出する
     source: RegionSource | None = None
+    # タイムラインの行(カテゴリ内のレーン番号)。None は自動配置に任せる
+    lane: int | None = None
 
     def __post_init__(self) -> None:
         if self.source is None:
