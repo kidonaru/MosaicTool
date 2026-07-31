@@ -166,15 +166,19 @@ def build_rows(regions: list[VideoRegion]) -> list[TimelineLane]:
     """カテゴリ順にレーン詰めした行リストを作る(空カテゴリは行を作らない)
 
     手動で行を指定した区間はその行を優先して確保する。指定によって上の行が
-    空く場合も、行番号と表示行がずれないよう空の行を残す。
+    空く場合も、行番号と表示行がずれないよう空の行を残す。自動検出だけは
+    外接矩形も渡し、直前フレームと重なる区間を同じ行へ続ける。
     """
     rows: list[TimelineLane] = []
     for source in CATEGORY_ORDER:
         group = [vr for vr in regions if vr.source is source]
         if not group:
             continue
+        rects = None
+        if source is RegionSource.AUTO:
+            rects = [vr.region.image_path().boundingRect() for vr in group]
         assigned = place_lanes(
-            [(vr.start, vr.end) for vr in group], [vr.lane for vr in group]
+            [(vr.start, vr.end) for vr in group], [vr.lane for vr in group], rects
         )
         buckets: list[list[VideoRegion]] = [[] for _ in range(max(assigned) + 1)]
         for vr, lane in zip(group, assigned):

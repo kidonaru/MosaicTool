@@ -206,6 +206,42 @@ class TestPlaceLanesWithRects:
         assert assigned[1::2] == [assigned[1]] * (len(intervals) // 2)
 
 
+def placed_vr(start, end, x, y, source):
+    """位置を指定した矩形 1 個ぶんの VideoRegion"""
+    region = Region(kind=RegionKind.RECT, rect=box(x, y))
+    return VideoRegion(region, start, end, source=source)
+
+
+class TestBuildRowsAutoTracking:
+    def test_auto_rows_follow_the_box(self):
+        # 検出順が入れ替わっても、同じ位置の対象は同じ行に並ぶ
+        regions = [
+            placed_vr(0, 4, 0, 0, RegionSource.AUTO),
+            placed_vr(0, 4, 100, 0, RegionSource.AUTO),
+            placed_vr(5, 9, 100, 0, RegionSource.AUTO),
+            placed_vr(5, 9, 0, 0, RegionSource.AUTO),
+        ]
+        rows = build_rows(regions)
+        assert [[(v.start, v.end) for v in row.items] for row in rows] == [
+            [(0, 4), (5, 9)], [(0, 4), (5, 9)],
+        ]
+        assert [row.items[1].region.rect.x() for row in rows] == [0.0, 100.0]
+
+    def test_rect_category_keeps_top_packing(self):
+        # 手描きカテゴリは形状を見ない(従来どおり最上段詰め)
+        regions = [
+            placed_vr(0, 4, 0, 0, RegionSource.RECT),
+            placed_vr(0, 4, 100, 0, RegionSource.RECT),
+            placed_vr(5, 9, 100, 0, RegionSource.RECT),
+        ]
+        rows = build_rows(regions)
+        assert [[(v.start, v.end) for v in row.items] for row in rows] == [
+            [(0, 4), (5, 9)], [(0, 4)],
+        ]
+        assert rows[0].items[1].region.rect.x() == 100.0
+        assert rows[1].items[0].region.rect.x() == 100.0
+
+
 class TestClampLaneDelta:
     def test_empty_is_zero(self):
         assert clamp_lane_delta([], [], 3) == 0
