@@ -2,12 +2,20 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QScrollArea, QVBoxLayout, QWidget
 
 from mosaic_tool.regions import Region
 from mosaic_tool.video.lanes import CATEGORY_LABELS, TimelineLane, build_rows
 from mosaic_tool.video.session import VideoRegion
+from mosaic_tool.video.timeline_selection import (
+    END,
+    MOVE,
+    START,
+    TimelineSelection,
+    apply_delta,
+    clamp_delta,
+)
 
 # レイアウト定数 (px)
 LABEL_W = 72   # 左端のカテゴリラベル列(スクロールに追従して固定表示)
@@ -32,6 +40,16 @@ _MINOR_DIVISORS = (10, 5, 2)
 # バーの端をつかめる判定幅 (px / 片側)
 HANDLE_PX = 5
 
+# ラバーバンド(矩形選択)を表す _drag の種類
+RUBBER = "rubber"
+
+# バー端の縁取りの幅 (px)。選択中は太くして掴める位置を示す
+BAR_EDGE_W = 1
+SELECTED_EDGE_W = 2
+# これより細いバーには縁取りを描かない(縁で埋まって区間が見えなくなる)。
+# _bar_rect が幅を最低 3px に広げるため、それより大きい値にする
+MIN_EDGE_BAR_W = 5.0
+
 # 配色: 動画編集ツールのタイムラインに合わせたダーク基調。
 # 余白 < 行 の明るさにして行の境目が見えるようにし、バーと文字は明るい色を載せる
 _BG = QColor(0x25, 0x25, 0x25)          # ウィンドウ全体と行間の余白
@@ -45,7 +63,11 @@ _TEXT_COLOR = QColor(0xDC, 0xDC, 0xDC)  # カテゴリラベル
 # バーは不透明。重なっても濃さが変わらず、区間の数を色で誤読しない
 _BAR_COLOR = QColor(0x6E, 0x9E, 0xD8)
 _SELECTED_COLOR = QColor(0x4D, 0xA3, 0xFF)
-_HANDLE_COLOR = QColor(0xFF, 0xFF, 0xFF)
+_BAR_EDGE = QColor(0xC3, 0xDB, 0xF5)       # バー端の縁取り(区間の境目を見せる)
+_BAR_DIM = QColor(0x44, 0x5A, 0x74)        # 選択があるときの非選択バー
+_SELECTED_EDGE = QColor(0xFF, 0xFF, 0xFF)  # 選択中バーの縁取り
+_RUBBER_FILL = QColor(0x4D, 0xA3, 0xFF, 0x40)  # 矩形選択の塗り(下が見える半透明)
+_RUBBER_LINE = QColor(0xCC, 0xDD, 0xFF)    # 矩形選択の枠線
 _PLAYHEAD_COLOR = QColor(0xFF, 0x50, 0x50)
 _GRID_MAJOR = QColor(0x3C, 0x3C, 0x3C)  # 主目盛りの縦線
 _GRID_MINOR = QColor(0x33, 0x33, 0x33)  # 副目盛りの縦線
@@ -82,9 +104,10 @@ class TimelineArea(QWidget):
     """タイムライン本体。ルーラー・カテゴリ行・区間バー・再生ヘッドを自前描画する"""
 
     seek_requested = Signal(int)              # ルーラーのクリック/ドラッグ
-    interval_edited = Signal(object, int, int)  # (Region, 開始, 終了) ドラッグ中に逐次
+    intervals_edited = Signal()               # 区間が変わった(ドラッグ中に逐次)
     region_clicked = Signal(object, int)      # (Region, クリック位置のフレーム)
-    delete_requested = Signal(object)         # (Region) 選択中バーの削除要求
+    delete_requested = Signal(list)           # ([Region]) 選択中バーの削除要求
+    selection_changed = Signal(list)          # 選択が変わった([Region])
     scroll_requested = Signal(int)            # ズーム時のアンカー補正スクロール量
     hscroll_requested = Signal(int)           # ホイールによる横スクロール量(相対 px)
     playback_toggle_requested = Signal()      # Space による再生/一時停止の要求
@@ -93,15 +116,22 @@ class TimelineArea(QWidget):
         super().__init__(parent)
         # キーで削除できるようクリックでフォーカスを受け取る
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        # ボタンを押していない移動でもカーソル形状を切り替えるため必要
+        self.setMouseTracking(True)
         self._total = 0
         self._frame = 0
         self._rows: list[TimelineLane] = []
-        self._selected: Region | None = None
+        self._selection = TimelineSelection()
         self._px_per_frame = 2.0
         self._scroll_x = 0  # ラベル列の固定表示に使う水平スクロール量
         # ("start" | "end" | "move" | "seek", 対象). seek は対象なし
         self._drag: tuple[str, VideoRegion | None] | None = None
         self._grab_offset = 0  # move ドラッグでつかんだ位置と開始フレームの差
+        self._drag_items: list[VideoRegion] = []  # ドラッグ開始時の選択(一括編集の対象)
+        # ラバーバンドの始点・終点(ウィジェット座標)と、加算開始時の元の選択
+        self._rubber_origin = QPointF()
+        self._rubber_end = QPointF()
+        self._rubber_base: list[VideoRegion] = []
 
     # --- データ更新 ---
 
@@ -110,13 +140,29 @@ class TimelineArea(QWidget):
         self._frame = min(self._frame, max(0, self._total - 1))
         self._apply_size()
 
-    def set_data(
-        self, regions: list[VideoRegion], selected: Region | None
-    ) -> None:
-        """区間一覧と選択中の範囲を反映し、行構成を作り直す"""
+    def set_data(self, regions: list[VideoRegion]) -> None:
+        """区間一覧を反映し、行構成を作り直す(消えた区間は選択から落とす)"""
         self._rows = build_rows(regions)
-        self._selected = selected
+        self._selection.prune(regions)
         self._apply_size()
+
+    def set_selection(self, regions: list[Region]) -> None:
+        """外部(キャンバス)の選択を反映する
+
+        自分が発端ではないため selection_changed は出さない。出すと app 側で
+        キャンバスとの同期が往復してしまう。
+        """
+        targets = {id(r) for r in regions}
+        self._selection.replace([
+            vr
+            for row in self._rows
+            for vr in row.items
+            if id(vr.region) in targets
+        ])
+        self.update()
+
+    def _emit_selection(self) -> None:
+        self.selection_changed.emit(self._selection.regions())
 
     def set_frame(self, frame: int) -> None:
         self._frame = frame
@@ -179,23 +225,24 @@ class TimelineArea(QWidget):
         return None
 
     def _edge_at(self, pos: QPointF) -> tuple[VideoRegion, str] | None:
-        """選択中のバーの端 (±HANDLE_PX) をつかんでいればどちらの端かを返す"""
-        if self._selected is None:
-            return None
+        """バーの端 (±HANDLE_PX) をつかんでいればどちらの端かを返す
+
+        選択の有無は問わない。掴んだ時点でそのバーを選択するため、選択と
+        リサイズを 2 手に分けずに済む。
+        """
         row_index = self._row_at(pos.y())
         if row_index is None:
             return None
-        for vr in self._rows[row_index].items:
-            if vr.region is not self._selected:
-                continue
+        for vr in reversed(self._rows[row_index].items):
             bar = self._bar_rect(row_index, vr)
             d_start = abs(pos.x() - bar.left())
             d_end = abs(pos.x() - bar.right())
             # 短いバーでは判定幅を細めて、中央の平行移動をつかめる余地を残す
             handle = min(HANDLE_PX, bar.width() / 3)
             if min(d_start, d_end) > handle:
-                return None
-            return vr, ("start" if d_start <= d_end else "end")
+                # 同じ行に並ぶ別のバーの端かもしれないので探し続ける
+                continue
+            return vr, (START if d_start <= d_end else END)
         return None
 
     def _bar_at(self, pos: QPointF) -> VideoRegion | None:
@@ -218,44 +265,133 @@ class TimelineArea(QWidget):
             self._drag = ("seek", None)
             self.seek_requested.emit(self._frame_at(pos.x()))
             return
+        if event.modifiers() & (
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
+        ):
+            # 修飾つきクリックは選択の出入りだけを行い、ドラッグは始めない
+            vr = self._bar_at(pos)
+            if vr is not None:
+                self._drag = None
+                self._selection.toggle(vr)
+                self._emit_selection()
+                self.update()
+                return
+            self._begin_rubber(pos, additive=True)
+            return
         edge = self._edge_at(pos)
         if edge is not None:
-            self._drag = (edge[1], edge[0])
+            self._begin_edit(edge[1], edge[0], pos)
             return
         vr = self._bar_at(pos)
         if vr is None:
-            self._drag = None
+            self._begin_rubber(pos, additive=False)
             return
-        self._drag = ("move", vr)
-        self._grab_offset = self._frame_at_raw(pos.x()) - vr.start
+        self._begin_edit(MOVE, vr, pos)
         self.region_clicked.emit(vr.region, self._frame_at(pos.x()))
 
     def mouseMoveEvent(self, event) -> None:
         if self._drag is None:
+            self._update_cursor(event.position())
             return
-        kind, vr = self._drag
+        kind, anchor = self._drag
         x = event.position().x()
         if kind == "seek":
             self.seek_requested.emit(self._frame_at(x))
             return
-        before = (vr.start, vr.end)
-        if kind == "start":
-            # 終了フレームを越えないようクランプする
-            vr.start = max(0, min(self._frame_at_raw(x), vr.end))
-        elif kind == "end":
-            # 終了側は「バーの右端」をつかむため、境界の 1 つ手前が終了フレーム
-            vr.end = max(vr.start, min(self._max_frame(), self._frame_at_raw(x) - 1))
-        else:
-            length = vr.end - vr.start
-            start = self._frame_at_raw(x) - self._grab_offset
-            vr.start = max(0, min(start, self._max_frame() - length))
-            vr.end = vr.start + length
-        if (vr.start, vr.end) != before:
+        if kind == RUBBER:
+            self._rubber_end = event.position()
+            self._apply_rubber()
             self.update()
-            self.interval_edited.emit(vr.region, vr.start, vr.end)
+            return
+        delta = clamp_delta(
+            self._drag_items,
+            kind,
+            self._desired_delta(kind, anchor, x),
+            self._max_frame(),
+        )
+        if delta == 0:
+            return
+        apply_delta(self._drag_items, kind, delta)
+        self.update()
+        self.intervals_edited.emit()
 
     def mouseReleaseEvent(self, event) -> None:
         self._drag = None
+        self._drag_items = []
+
+    def _begin_rubber(self, pos: QPointF, additive: bool) -> None:
+        """空白からのドラッグで矩形選択を始める
+
+        修飾なしなら元の選択を捨てる(空白クリックだけで選択解除になる)。
+        """
+        self._drag = (RUBBER, None)
+        self._rubber_origin = pos
+        self._rubber_end = pos
+        self._rubber_base = self._selection.items() if additive else []
+        if not additive and len(self._selection) > 0:
+            self._selection.clear()
+            self._emit_selection()
+        self.update()
+
+    def _rubber_rect(self) -> QRectF:
+        """始点と終点から作る選択矩形
+
+        真横や真下へ払うドラッグでは幅か高さが 0 になる。Qt は空の矩形の交差を
+        常に偽と返すため、最低 1px の広がりを持たせて 1 行だけを払う操作を通す。
+        """
+        rect = QRectF(self._rubber_origin, self._rubber_end).normalized()
+        if rect.width() < 1.0:
+            rect.setWidth(1.0)
+        if rect.height() < 1.0:
+            rect.setHeight(1.0)
+        return rect
+
+    def _apply_rubber(self) -> None:
+        """矩形と交差する区間バーを選択する(加算開始なら元の選択へ足す)"""
+        rect = self._rubber_rect()
+        hits = [
+            vr
+            for i, row in enumerate(self._rows)
+            for vr in row.items
+            if self._bar_rect(i, vr).intersects(rect)
+        ]
+        self._selection.replace(self._rubber_base + hits)
+        self._emit_selection()
+
+    def _begin_edit(self, kind: str, anchor: VideoRegion, pos: QPointF) -> None:
+        """つかんだバーを起点に区間編集のドラッグを始める
+
+        つかんだバーが選択外なら、そのバー 1 つだけを選び直す。選択内なら
+        選択全体が対象になる。
+        """
+        if not self._selection.contains(anchor):
+            self._selection.replace([anchor])
+            self._emit_selection()
+            self.update()
+        self._drag = (kind, anchor)
+        self._drag_items = self._selection.items()
+        self._grab_offset = self._frame_at_raw(pos.x()) - anchor.start
+
+    def _desired_delta(self, kind: str, anchor: VideoRegion, x: float) -> int:
+        """つかんだバーの目標位置から、選択全体へ当てたい移動量を出す"""
+        frame = self._frame_at_raw(x)
+        if kind == MOVE:
+            return frame - self._grab_offset - anchor.start
+        if kind == START:
+            return frame - anchor.start
+        # 終了側は「バーの右端」をつかむため、境界の 1 つ手前が終了フレーム
+        return frame - 1 - anchor.end
+
+    def _update_cursor(self, pos: QPointF) -> None:
+        """カーソル位置に応じて形状を変え、できる操作を示す"""
+        if pos.y() < RULER_H:
+            self.unsetCursor()
+        elif self._edge_at(pos) is not None:
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        elif self._bar_at(pos) is not None:
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+        else:
+            self.unsetCursor()
 
     def _max_frame(self) -> int:
         return max(0, self._total - 1)
@@ -267,9 +403,9 @@ class TimelineArea(QWidget):
             return
         if (
             event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace)
-            and self._selected is not None
+            and len(self._selection) > 0
         ):
-            self.delete_requested.emit(self._selected)
+            self.delete_requested.emit(self._selection.regions())
             event.accept()
             return
         super().keyPressEvent(event)
@@ -311,6 +447,7 @@ class TimelineArea(QWidget):
         self._paint_rows(painter, rect)
         self._paint_grid(painter, rect)
         self._paint_bars(painter, rect)
+        self._paint_rubber(painter)
         self._paint_ruler(painter, rect)
         self._paint_playhead(painter)
         self._paint_labels(painter)
@@ -367,20 +504,58 @@ class TimelineArea(QWidget):
         """
         left_frame = self._frame_at_raw(rect.left()) - 1
         right_frame = self._frame_at_raw(rect.right()) + 1
+        # 選択が 1 つ以上あるときだけ非選択バーを沈め、選択を浮き上がらせる
+        dim = len(self._selection) > 0
         painter.setPen(Qt.PenStyle.NoPen)
         for i, row in enumerate(self._rows):
             for vr in row.items:
                 if vr.end < left_frame or vr.start > right_frame:
                     continue
-                selected = self._selected is not None and vr.region is self._selected
+                selected = self._selection.contains(vr)
                 bar = self._bar_rect(i, vr)
-                painter.setBrush(_SELECTED_COLOR if selected else _BAR_COLOR)
-                painter.drawRect(bar)
                 if selected:
-                    # 端ハンドル(白い縦線)でドラッグできることを示す
-                    painter.setBrush(_HANDLE_COLOR)
-                    for x in (bar.left(), bar.right() - 3):
-                        painter.drawRect(QRectF(x, bar.top(), 3, bar.height()))
+                    painter.setBrush(_SELECTED_COLOR)
+                else:
+                    painter.setBrush(_BAR_DIM if dim else _BAR_COLOR)
+                painter.drawRect(bar)
+                self._paint_bar_edges(painter, bar, selected)
+                if selected:
+                    self._paint_selected_outline(painter, bar)
+
+    def _paint_bar_edges(
+        self, painter: QPainter, bar: QRectF, selected: bool
+    ) -> None:
+        """バーの左右端に縁取り線を描き、区間の境目と掴める位置を示す"""
+        if bar.width() < MIN_EDGE_BAR_W:
+            return
+        width = SELECTED_EDGE_W if selected else BAR_EDGE_W
+        painter.setBrush(_SELECTED_EDGE if selected else _BAR_EDGE)
+        painter.drawRect(QRectF(bar.left(), bar.top(), width, bar.height()))
+        painter.drawRect(
+            QRectF(bar.right() - width, bar.top(), width, bar.height())
+        )
+
+    def _paint_selected_outline(self, painter: QPainter, bar: QRectF) -> None:
+        """選択中バーを白線で囲む
+
+        色差だけでなく形でも分かるようにして、バーが密集した行でも見失わない。
+        呼び出し後にペンとブラシを塗り用へ戻す。
+        """
+        painter.setPen(_SELECTED_EDGE)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        # drawRect は右端と下端を線の分だけはみ出すため 1px 内側へ寄せる
+        painter.drawRect(bar.adjusted(0, 0, -1, -1))
+        painter.setPen(Qt.PenStyle.NoPen)
+
+    def _paint_rubber(self, painter: QPainter) -> None:
+        """ドラッグ中の矩形選択を描く(半透明の塗りと点線枠)"""
+        if self._drag is None or self._drag[0] != RUBBER:
+            return
+        pen = QPen(_RUBBER_LINE)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(_RUBBER_FILL)
+        painter.drawRect(self._rubber_rect())
 
     def _paint_playhead(self, painter: QPainter) -> None:
         x = self._x(self._frame)
@@ -413,9 +588,10 @@ class TimelineWindow(QWidget):
 
     # TimelineArea の同名シグナルをそのまま中継する
     seek_requested = Signal(int)
-    interval_edited = Signal(object, int, int)
+    intervals_edited = Signal()
     region_clicked = Signal(object, int)
-    delete_requested = Signal(object)
+    delete_requested = Signal(list)
+    selection_changed = Signal(list)
     playback_toggle_requested = Signal()
 
     def __init__(self, parent=None):
@@ -443,9 +619,10 @@ class TimelineWindow(QWidget):
             self._area.set_scroll_x
         )
         self._area.seek_requested.connect(self.seek_requested)
-        self._area.interval_edited.connect(self.interval_edited)
+        self._area.intervals_edited.connect(self.intervals_edited)
         self._area.region_clicked.connect(self.region_clicked)
         self._area.delete_requested.connect(self.delete_requested)
+        self._area.selection_changed.connect(self.selection_changed)
         self._area.scroll_requested.connect(self._scroll_to)
         self._area.hscroll_requested.connect(self._scroll_by)
         self._area.playback_toggle_requested.connect(self.playback_toggle_requested)
@@ -465,10 +642,11 @@ class TimelineWindow(QWidget):
     def set_total(self, total: int) -> None:
         self._area.set_total(total)
 
-    def set_data(
-        self, regions: list[VideoRegion], selected: Region | None
-    ) -> None:
-        self._area.set_data(regions, selected)
+    def set_data(self, regions: list[VideoRegion]) -> None:
+        self._area.set_data(regions)
+
+    def set_selection(self, regions: list[Region]) -> None:
+        self._area.set_selection(regions)
 
     def set_frame(self, frame: int) -> None:
         """再生ヘッドを移動し、可視範囲から外れたらスクロールで追従する"""

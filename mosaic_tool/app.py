@@ -113,7 +113,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._timeline)
         self.setCentralWidget(container)
         self.canvas.regions_changed.connect(self._on_regions_changed)
-        self.canvas.selection_changed.connect(self._update_timeline_window)
+        self.canvas.selection_changed.connect(self._on_canvas_selection_changed)
         self.statusBar().showMessage("画像ファイルまたはフォルダをドロップしてください")
 
         self._images: list[Path] = []          # 編集対象の画像リスト
@@ -142,6 +142,8 @@ class MainWindow(QMainWindow):
         self._video: VideoSession | None = None
         # 区間指定用のタイムラインウィンドウ(初回の動画で生成する)
         self._timeline_window: TimelineWindow | None = None
+        # 直前にタイムラインからキャンバスへ流した選択。跳ね返りを見分けるために覚える
+        self._pushed_selection: set[int] = set()
         self._exporter: VideoExporter | None = None
         self._export_dialog: QProgressDialog | None = None
         # 動画への自動検出の実行状態(None なら未実行)
@@ -853,7 +855,10 @@ class MainWindow(QMainWindow):
         video.frame = frame
         self._current_image = img
         self.canvas.set_image(img, video.regions_at(frame))
-        self.canvas.setFocus()
+        # タイムラインウィンドウを操作している最中にフォーカスを奪うと、
+        # そちらの Delete や Space が効かなくなる
+        if self.isActiveWindow():
+            self.canvas.setFocus()
 
     def _on_frame_fetch_failed(self, frame: int, message: str) -> None:
         # シーク中は要求ごとに失敗し得るため、モーダルではなくステータスバーで知らせる
@@ -996,9 +1001,10 @@ class MainWindow(QMainWindow):
         if self._timeline_window is None:
             window = TimelineWindow(self)
             window.seek_requested.connect(self._timeline.seek)
-            window.interval_edited.connect(self._on_timeline_interval_edited)
+            window.intervals_edited.connect(self._on_timeline_intervals_edited)
             window.region_clicked.connect(self._on_timeline_region_clicked)
             window.delete_requested.connect(self._on_timeline_delete)
+            window.selection_changed.connect(self._on_timeline_selection_changed)
             window.playback_toggle_requested.connect(self._toggle_playback)
             self._timeline_window = window
         return self._timeline_window
@@ -1015,24 +1021,47 @@ class MainWindow(QMainWindow):
         window.raise_()
 
     def _update_timeline_window(self) -> None:
-        """全区間と選択状態をタイムラインウィンドウへ反映する"""
+        """全区間をタイムラインウィンドウへ反映する"""
         if self._timeline_window is None or self._video is None:
             return
-        selected = self.canvas.selected_regions()
-        self._timeline_window.set_data(
-            self._video.regions, selected[0] if len(selected) == 1 else None
-        )
+        self._timeline_window.set_data(self._video.regions)
 
-    def _on_timeline_interval_edited(
-        self, region: Region, start: int, end: int
-    ) -> None:
-        """タイムラインの端ドラッグ・平行移動を区間へ反映する"""
-        video = self._video
-        vr = video.find(region) if video is not None else None
-        if vr is None:
+    def _on_canvas_selection_changed(self) -> None:
+        """キャンバスの選択をタイムラインへ反映する
+
+        2 種類の通知は無視する。空の通知はシーンの作り直し(フレームの描き直し)で
+        必ず起きるため、タイムラインの選択を巻き込ませない。自分が流した内容と
+        同じ通知は跳ね返りで、反映するとタイムラインの複数選択がキャンバスに
+        映る分だけへ削られてしまう。
+        """
+        if self._timeline_window is None:
             return
-        vr.start, vr.end = start, end
+        selected = self.canvas.selected_regions()
+        if not selected or {id(r) for r in selected} == self._pushed_selection:
+            return
+        self._timeline_window.set_selection(selected)
+
+    def _on_timeline_selection_changed(self, regions: list) -> None:
+        """タイムラインの選択をキャンバスへ反映する(現在フレームに掛かる分だけ)"""
+        video = self._video
+        if video is None:
+            return
+        shown = {id(r) for r in video.regions_at(video.frame)}
+        visible = [r for r in regions if id(r) in shown]
+        self._pushed_selection = {id(r) for r in visible}
+        self.canvas.select_regions(visible)
+
+    def _on_timeline_intervals_edited(self) -> None:
+        """タイムラインでの区間編集を受けて表示と未保存状態を合わせる
+
+        区間の値はタイムライン側が直接書き換えている。ここでは掛かり具合の
+        変化をキャンバスへ映す(掛かる範囲の集合が変わったときだけ作り直される)。
+        """
+        video = self._video
+        if video is None:
+            return
         self._dirty = True
+        self.canvas.set_playback_regions(video.regions_at(video.frame))
 
     def _on_timeline_region_clicked(self, region: Region, frame: int) -> None:
         """タイムラインのバークリックでクリック位置へ移動し、その範囲を選択する"""
@@ -1044,15 +1073,20 @@ class MainWindow(QMainWindow):
             self._timeline.seek(frame)
         self.canvas.select_regions([region])
 
-    def _on_timeline_delete(self, region: Region) -> None:
-        """タイムラインで選択中の範囲を削除する(区間リストからも外す)"""
+    def _on_timeline_delete(self, regions: list) -> None:
+        """タイムラインで選択中の範囲をまとめて削除する(区間リストからも外す)"""
         video = self._video
-        vr = video.find(region) if video is not None else None
-        if vr is None:
+        if video is None:
+            return
+        targets = [
+            vr for vr in video.regions if any(vr.region is r for r in regions)
+        ]
+        if not targets:
             return
         # キャンバスに出ていれば Undo 可能な削除を通す(出ていなければ何もしない)
-        self.canvas.delete_regions([region])
-        video.regions = [v for v in video.regions if v is not vr]
+        self.canvas.delete_regions([vr.region for vr in targets])
+        dead = {id(vr) for vr in targets}
+        video.regions = [vr for vr in video.regions if id(vr) not in dead]
         self._dirty = True
         self._update_timeline_window()
 

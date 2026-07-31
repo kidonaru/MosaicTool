@@ -549,14 +549,24 @@ class TestTimelineWindowIntegration:
         video.canvas.add_region(region)      # sync で現在フレームの区間になる
         video._dirty = False
         vr = video._video.find(region)
-        video._timeline_window.interval_edited.emit(region, 0, 50)
+        vr.start, vr.end = 0, 50             # タイムラインが直接書き換える
+        video._timeline_window.intervals_edited.emit()
         assert (vr.start, vr.end) == (0, 50)
         assert video._dirty
+
+    def test_interval_edit_shows_regions_newly_covering_the_frame(self, video):
+        # 現在フレーム(0)に掛からない区間を掛かるよう伸ばしたら表示へ現れる
+        region = _rect_region()
+        video._video.regions.append(VideoRegion(region, 50, 60))
+        assert video.canvas.get_regions() == []
+        video._video.find(region).start = 0
+        video._timeline_window.intervals_edited.emit()
+        assert video.canvas.get_regions() == [region]
 
     def test_delete_from_window_removes_region(self, video):
         region = _rect_region()
         video.canvas.add_region(region)
-        video._timeline_window.delete_requested.emit(region)
+        video._timeline_window.delete_requested.emit([region])
         assert video._video.find(region) is None
         assert video.canvas.get_regions() == []
 
@@ -564,8 +574,16 @@ class TestTimelineWindowIntegration:
         # 現在フレーム(0)に掛からない範囲はキャンバスに無くても消せる
         region = _rect_region()
         video._video.regions.append(VideoRegion(region, 50, 60))
-        video._timeline_window.delete_requested.emit(region)
+        video._timeline_window.delete_requested.emit([region])
         assert video._video.find(region) is None
+
+    def test_delete_removes_every_selected_region(self, video):
+        shown, hidden = _rect_region(), _rect_region()
+        video.canvas.add_region(shown)
+        video._video.regions.append(VideoRegion(hidden, 50, 60))
+        video._timeline_window.delete_requested.emit([shown, hidden])
+        assert video._video.regions == []
+        assert video.canvas.get_regions() == []
 
     def test_region_click_seeks_to_clicked_frame_and_selects(self, video):
         region = _rect_region()
@@ -600,6 +618,68 @@ class TestTimelineWindowIntegration:
     def test_window_shows_all_intervals(self, video):
         video.canvas.add_region(_rect_region())
         assert len(video._timeline_window._area._rows) == 1
+
+    def test_timeline_selection_flows_to_canvas(self, video):
+        region = _rect_region()
+        video.canvas.add_region(region)
+        video.canvas.select_regions([])
+        video._timeline_window.selection_changed.emit([region])
+        assert video.canvas.selected_regions() == [region]
+
+    def test_timeline_selection_skips_regions_outside_the_frame(self, video):
+        # 現在フレームに掛からない範囲はキャンバスへ流さない(表示が無い)
+        region = _rect_region()
+        video._video.regions.append(VideoRegion(region, 50, 60))
+        video._timeline_window.selection_changed.emit([region])
+        assert video.canvas.selected_regions() == []
+
+    def test_empty_canvas_selection_does_not_clear_the_timeline(self, video):
+        # シーンの作り直しは常に空の選択を通知する。巻き込まれてはいけない
+        region = _rect_region()
+        video.canvas.add_region(region)
+        video._timeline_window.set_selection([region])
+        video.canvas.select_regions([])
+        assert video._timeline_window._area._selection.items() != []
+
+    def test_canvas_selection_flows_to_the_timeline(self, video):
+        region = _rect_region()
+        video.canvas.add_region(region)
+        video.canvas.select_regions([region])
+        items = video._timeline_window._area._selection.items()
+        assert [i.region for i in items] == [region]
+
+    def test_selection_sync_does_not_bounce_back(self, video):
+        # タイムラインの複数選択が、キャンバス経由で可視分だけへ縮まない
+        shown, hidden = _rect_region(), _rect_region()
+        video.canvas.add_region(shown)
+        video._video.regions.append(VideoRegion(hidden, 50, 60))
+        window = video._timeline_window
+        window.set_data(video._video.regions)
+        window._area._selection.replace(video._video.regions)
+        window._area.selection_changed.emit(
+            [vr.region for vr in video._video.regions]
+        )
+        assert len(window._area._selection) == 2
+
+    def test_frame_redraw_keeps_focus_when_window_inactive(self, video, monkeypatch):
+        # タイムラインウィンドウ操作中にフォーカスを奪うと Delete や Space が
+        # 効かなくなるため、メインウィンドウが非アクティブなら受け取らない
+        monkeypatch.setattr(type(video), "isActiveWindow", lambda self: False)
+        grabbed = []
+        monkeypatch.setattr(
+            type(video.canvas), "setFocus", lambda self: grabbed.append(True)
+        )
+        video._timeline.seek(10)
+        assert grabbed == []
+
+    def test_frame_redraw_takes_focus_when_window_active(self, video, monkeypatch):
+        monkeypatch.setattr(type(video), "isActiveWindow", lambda self: True)
+        grabbed = []
+        monkeypatch.setattr(
+            type(video.canvas), "setFocus", lambda self: grabbed.append(True)
+        )
+        video._timeline.seek(10)
+        assert grabbed == [True]
 
 
 class TestVideoDetectRange:
