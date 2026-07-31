@@ -22,8 +22,11 @@ FFMPEG_DIR_NAME = "ffmpeg"
 # mp4 コンテナへそのままコピーできる音声コーデック。それ以外は AAC へ再エンコードする
 MP4_COPY_AUDIO = {"aac", "mp3", "ac3", "eac3"}
 
-# 書き出しの H.264 品質 (CRF。小さいほど高品質)
-ENCODE_CRF = 18
+# 書き出し設定のプリセット。品質は CRF (小さいほど高品質) をそのまま扱う。
+# 同じ見た目の品質でも H.265 は CRF が高めになるため、レンジと既定値はコーデック別
+EXPORT_SHORT_SIDES = (1080, 720, 480)  # 解像度プリセット (短辺上限 px)
+EXPORT_CRF_RANGES = {"h264": (14, 28), "h265": (18, 32)}  # (高品質, 低容量)
+EXPORT_CRF_DEFAULTS = {"h264": 18, "h265": 22}  # h264 の 18 は従来の書き出し品質
 
 # 再生プレビューの横幅上限 (px)。1080p 以下は原寸のまま再生し、4K などは
 # 縮めてパイプの帯域を抑える(4K 原寸の rawvideo はデコードが実時間に届かない)
@@ -91,6 +94,42 @@ class VideoInfo:
     frame_count: int
     duration: float
     audio_codec: str | None
+
+
+@dataclass(frozen=True)
+class ExportSettings:
+    """書き出しダイアログで選ぶ設定。既定値は従来の書き出し (H.264 / CRF 18 / 元サイズ)"""
+
+    codec: str = "h264"                # "h264" | "h265"
+    max_short_side: int | None = None  # 短辺の上限 px。None は元のサイズ
+    crf: int = EXPORT_CRF_DEFAULTS["h264"]  # 小さいほど高品質
+
+
+def crf_range(codec: str) -> tuple[int, int]:
+    """コーデックで扱う CRF の (最小=高品質, 最大=低容量)
+
+    未知のコーデックは encode_command のフォールバックと揃えて h264 扱いにする。
+    """
+    return EXPORT_CRF_RANGES.get(codec, EXPORT_CRF_RANGES["h264"])
+
+
+def crf_default(codec: str) -> int:
+    """コーデックごとの既定 CRF (未知のコーデックは h264 扱い)"""
+    return EXPORT_CRF_DEFAULTS.get(codec, EXPORT_CRF_DEFAULTS["h264"])
+
+
+def export_size(info: VideoInfo, max_short_side: int | None) -> tuple[int, int]:
+    """書き出しの出力サイズ。短辺を上限に縮小のみ行い、偶数へ丸める
+
+    偶数へ丸めるのは yuv420p が奇数サイズを扱えないため (縮小なしでも適用する)。
+    """
+    short = min(info.width, info.height)
+    if max_short_side is None or short <= max_short_side:
+        width, height = info.width, info.height
+    else:
+        width = round(info.width * max_short_side / short)
+        height = round(info.height * max_short_side / short)
+    return max(2, width - width % 2), max(2, height - height % 2)
 
 
 class VideoError(Exception):
@@ -253,9 +292,9 @@ def decode_command(src: Path, info: VideoInfo) -> list[str]:
 
 
 def encode_command(
-    src: Path, dest: Path, info: VideoInfo, *, strip_meta: bool
+    src: Path, dest: Path, info: VideoInfo, *, strip_meta: bool, export: ExportSettings
 ) -> list[str]:
-    """標準入力の rawvideo を H.264 でエンコードし、音声を元動画から引き継ぐコマンド"""
+    """標準入力の rawvideo をエンコードし、音声を元動画から引き継ぐコマンド"""
     cmd = [
         str(ffmpeg_path()), "-y", "-v", "error",
         "-f", "rawvideo", "-pix_fmt", "rgb24",
@@ -265,11 +304,18 @@ def encode_command(
     ]
     if info.audio_codec is not None:
         cmd += ["-map", "1:a"]
+    codec = "libx265" if export.codec == "h265" else "libx264"
+    width, height = export_size(info, export.max_short_side)
     cmd += [
-        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", str(ENCODE_CRF),
-        # yuv420p は奇数サイズを扱えないため、偶数サイズへ切り詰める
-        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+        "-c:v", codec, "-pix_fmt", "yuv420p",
+        "-crf", str(export.crf),
+        "-vf", f"scale={width}:{height}",
     ]
+    if export.codec == "h265":
+        # hvc1: Apple 系プレイヤーで再生できるようにするタグ。
+        # preset fast: x265 の既定 (medium) は極端に遅く、エンコーダ待ちの
+        # タイムアウト(exporter.ENCODER_WAIT)に届きうるため速度優先にする
+        cmd += ["-tag:v", "hvc1", "-preset", "fast"]
     if info.audio_codec is not None:
         if info.audio_codec in MP4_COPY_AUDIO:
             cmd += ["-c:a", "copy"]

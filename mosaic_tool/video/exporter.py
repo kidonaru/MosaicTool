@@ -42,6 +42,7 @@ class VideoExporter(QThread):
         block: int,
         threshold: float,
         strip_meta: bool,
+        export: ffmpeg.ExportSettings,
     ):
         super().__init__()
         self._src = src
@@ -51,6 +52,7 @@ class VideoExporter(QThread):
         self._block = block
         self._threshold = threshold
         self._strip_meta = strip_meta
+        self._export = export
         self._cancelled = False
         self._decoder = None
         self._encoder = None
@@ -92,7 +94,8 @@ class VideoExporter(QThread):
             )
             encoder = self._encoder = subprocess.Popen(
                 ffmpeg.encode_command(
-                    self._src, self._dest, self._info, strip_meta=self._strip_meta
+                    self._src, self._dest, self._info,
+                    strip_meta=self._strip_meta, export=self._export,
                 ),
                 stdin=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 creationflags=ffmpeg.subprocess_flags(),
@@ -128,7 +131,14 @@ class VideoExporter(QThread):
                 # 中断でプロセスを落とした際のパイプ切れは失敗ではなく中断として扱う
                 self.export_finished.emit(False, "書き出しをキャンセルしました")
             else:
-                self.export_finished.emit(False, f"書き出しに失敗しました: {e}")
+                message = f"書き出しに失敗しました: {e}"
+                if self._export.codec == "h265":
+                    # エンコーダ不在でも詳細が残らないため、可能性として案内する
+                    message += (
+                        "\n(ご利用の ffmpeg が H.265 エンコードに"
+                        "対応していない可能性があります)"
+                    )
+                self.export_finished.emit(False, message)
         finally:
             self._kill(self._decoder)
             self._kill(self._encoder)

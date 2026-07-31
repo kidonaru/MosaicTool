@@ -38,6 +38,7 @@ from mosaic_tool.settings import AppSettings
 from mosaic_tool.version import APP_NAME, __version__
 from mosaic_tool.video import ffmpeg as video_ffmpeg
 from mosaic_tool.video.detect_range_dialog import DetectRangeDialog, detect_frame_count
+from mosaic_tool.video.export_dialog import ExportDialog
 from mosaic_tool.video.exporter import VideoExporter
 from mosaic_tool.video.frame_fetcher import FrameFetcher
 from mosaic_tool.video.merge import Detection, merge_detections, parse_detection
@@ -1098,9 +1099,12 @@ class MainWindow(QMainWindow):
     # --- 動画の書き出し ---
 
     def _export_video(self) -> None:
-        """動画へモザイクを合成して書き出す(進捗ダイアログつき)"""
+        """動画へモザイクを合成して書き出す(設定ダイアログ → 進捗ダイアログ)"""
         video = self._video
         if video is None or self._exporter is not None:
+            return
+        export_settings_dialog = ExportDialog(video.info, self._settings, self)
+        if export_settings_dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self._sync_video_regions()
         dest = video_ffmpeg.mc_video_path(video.path)
@@ -1115,6 +1119,7 @@ class MainWindow(QMainWindow):
             self._block,
             self._threshold / 100,
             self._strip_meta_check.isChecked(),
+            export_settings_dialog.export_settings(),
         )
         dialog = QProgressDialog(
             "動画を書き出し中...", "キャンセル", 0, video.info.frame_count, self

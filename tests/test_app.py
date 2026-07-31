@@ -895,3 +895,62 @@ class TestPlayback:
         assert video._video.frame == 15
         assert video._timeline.frame() == 15
         assert video._timeline_window._area._frame == 15
+
+
+class TestExportDialogWiring:
+    def test_cancel_does_not_start_export(self, video, monkeypatch):
+        class FakeDialog:
+            def __init__(self, *a, **k):
+                pass
+
+            def exec(self):
+                return QDialog.DialogCode.Rejected
+
+        monkeypatch.setattr("mosaic_tool.app.ExportDialog", FakeDialog)
+        monkeypatch.setattr(
+            "mosaic_tool.app.VideoExporter",
+            lambda *a, **k: pytest.fail("キャンセルしたのに書き出しが始まった"),
+        )
+        video._export_video()
+        assert video._exporter is None
+
+    def test_accept_passes_the_chosen_settings_to_the_exporter(
+        self, video, monkeypatch
+    ):
+        chosen = video_ffmpeg.ExportSettings("h265", 720, 40)
+
+        class FakeDialog:
+            def __init__(self, *a, **k):
+                pass
+
+            def exec(self):
+                return QDialog.DialogCode.Accepted
+
+            def export_settings(self):
+                return chosen
+
+        class FakeSignal:
+            def connect(self, *a):
+                pass
+
+        created = []
+
+        class FakeExporter:
+            def __init__(self, *args):
+                created.append(args)
+                self.progress = FakeSignal()
+                self.export_finished = FakeSignal()
+
+            def start(self):
+                pass
+
+            def cancel(self):
+                pass
+
+        monkeypatch.setattr("mosaic_tool.app.ExportDialog", FakeDialog)
+        monkeypatch.setattr("mosaic_tool.app.VideoExporter", FakeExporter)
+        video._export_video()
+        assert created and created[0][-1] == chosen
+        # フェイクは完了シグナルを出さないため、後始末は手で戻す
+        video._exporter = None
+        video._export_dialog = None

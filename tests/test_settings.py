@@ -131,3 +131,43 @@ def test_device_roundtrip_and_invalid_value(tmp_path):
     assert settings.device() == "cpu"
     settings.set_device("gpu")
     assert settings.device() == DEFAULT_DEVICE
+
+
+def test_video_export_defaults(tmp_path):
+    s = _settings(tmp_path)
+    assert s.video_codec() == "h264"
+    assert s.video_resolution() == 0
+    # CRF の既定値はコーデックごとに違う
+    assert s.video_crf("h264") == 18
+    assert s.video_crf("h265") == 22
+
+
+def test_video_export_roundtrip(tmp_path):
+    s = _settings(tmp_path)
+    s.set_video_codec("h265")
+    s.set_video_resolution(720)
+    s.set_video_crf("h264", 20)
+    s.set_video_crf("h265", 26)
+    s2 = _settings(tmp_path)
+    assert s2.video_codec() == "h265"
+    assert s2.video_resolution() == 720
+    assert s2.video_crf("h264") == 20
+    assert s2.video_crf("h265") == 26
+
+
+def test_video_export_invalid_values_fall_back(tmp_path):
+    """手動編集などで壊れた値は既定値へ戻す"""
+    s = _settings(tmp_path)
+    s._qsettings.setValue("video/codec", "av1")
+    s._qsettings.setValue("video/resolution", 999)
+    s._qsettings.setValue("video/crf/h264", 50)
+    assert s.video_codec() == "h264"
+    assert s.video_resolution() == 0
+    assert s.video_crf("h264") == 18
+
+
+def test_video_crf_rejects_the_other_codecs_range(tmp_path):
+    """H.265 のレンジ (18〜32) の値は H.264 側では既定値へ戻す"""
+    s = _settings(tmp_path)
+    s.set_video_crf("h264", 32)
+    assert s.video_crf("h264") == 18

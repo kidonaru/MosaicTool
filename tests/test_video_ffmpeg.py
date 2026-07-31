@@ -152,25 +152,111 @@ class TestCommands:
         assert ffmpeg.proxy_size(info, 960) == (100, 56)
 
     def test_encode_copies_compatible_audio(self, info):
-        cmd = ffmpeg.encode_command(Path("in.mp4"), Path("out.mp4"), info, strip_meta=False)
+        cmd = ffmpeg.encode_command(
+            Path("in.mp4"), Path("out.mp4"), info,
+            strip_meta=False, export=ffmpeg.ExportSettings(),
+        )
         assert cmd[cmd.index("-c:a") + 1] == "copy"
         assert cmd[cmd.index("-map_metadata") + 1] == "1"
         assert "1:a" in cmd
 
     def test_encode_reencodes_incompatible_audio(self, info):
         vorbis = ffmpeg.VideoInfo(1280, 720, 30.0, "30/1", 90, 3.0, "vorbis")
-        cmd = ffmpeg.encode_command(Path("in.mp4"), Path("out.mp4"), vorbis, strip_meta=False)
+        cmd = ffmpeg.encode_command(
+            Path("in.mp4"), Path("out.mp4"), vorbis,
+            strip_meta=False, export=ffmpeg.ExportSettings(),
+        )
         assert cmd[cmd.index("-c:a") + 1] == "aac"
 
     def test_encode_without_audio(self, info):
         silent = ffmpeg.VideoInfo(1280, 720, 30.0, "30/1", 90, 3.0, None)
-        cmd = ffmpeg.encode_command(Path("in.mp4"), Path("out.mp4"), silent, strip_meta=False)
+        cmd = ffmpeg.encode_command(
+            Path("in.mp4"), Path("out.mp4"), silent,
+            strip_meta=False, export=ffmpeg.ExportSettings(),
+        )
         assert "-c:a" not in cmd
         assert "1:a" not in cmd
 
     def test_encode_strip_meta(self, info):
-        cmd = ffmpeg.encode_command(Path("in.mp4"), Path("out.mp4"), info, strip_meta=True)
+        cmd = ffmpeg.encode_command(
+            Path("in.mp4"), Path("out.mp4"), info,
+            strip_meta=True, export=ffmpeg.ExportSettings(),
+        )
         assert cmd[cmd.index("-map_metadata") + 1] == "-1"
+
+
+class TestCrfPresets:
+    def test_ranges_per_codec(self):
+        # H.265 は同品質の CRF が高めのためレンジをずらす
+        assert ffmpeg.crf_range("h264") == (14, 28)
+        assert ffmpeg.crf_range("h265") == (18, 32)
+
+    def test_default_keeps_current_h264_crf(self):
+        # H.264 の既定値は従来の書き出し品質 (CRF 18) と一致させる
+        assert ffmpeg.crf_default("h264") == 18
+        assert ffmpeg.crf_default("h265") == 22
+
+    def test_unknown_codec_falls_back_to_h264(self):
+        # encode_command のコーデック選択と同じく未知値は h264 扱いにする
+        assert ffmpeg.crf_range("av1") == ffmpeg.crf_range("h264")
+        assert ffmpeg.crf_default("av1") == 18
+
+
+class TestExportSize:
+    def _info(self, w, h):
+        return ffmpeg.VideoInfo(w, h, 30.0, "30/1", 90, 3.0, None)
+
+    def test_no_limit_keeps_original(self):
+        assert ffmpeg.export_size(self._info(1920, 1080), None) == (1920, 1080)
+
+    def test_shrinks_by_short_side(self):
+        # 4K → 1080p は短辺 2160 → 1080 の半分に縮む
+        assert ffmpeg.export_size(self._info(3840, 2160), 1080) == (1920, 1080)
+
+    def test_portrait_uses_short_side(self):
+        # 縦動画の短辺は横幅。1080p 指定でも短辺 1080 なら無変換
+        assert ffmpeg.export_size(self._info(1080, 1920), 1080) == (1080, 1920)
+
+    def test_never_upscales(self):
+        assert ffmpeg.export_size(self._info(640, 360), 1080) == (640, 360)
+
+    def test_rounds_to_even(self):
+        # yuv420p が奇数サイズを扱えないため偶数へ切り詰める
+        assert ffmpeg.export_size(self._info(101, 57), None) == (100, 56)
+
+
+class TestEncodeExportSettings:
+    def _cmd(self, info, export):
+        return ffmpeg.encode_command(
+            Path("in.mp4"), Path("out.mp4"), info, strip_meta=False, export=export
+        )
+
+    def test_h264_defaults(self, info):
+        cmd = self._cmd(info, ffmpeg.ExportSettings())
+        assert cmd[cmd.index("-c:v") + 1] == "libx264"
+        assert cmd[cmd.index("-crf") + 1] == "18"
+        assert "-tag:v" not in cmd
+        assert "-preset" not in cmd
+
+    def test_h265_uses_libx265_with_hvc1_tag(self, info):
+        # hvc1 タグは Apple 系プレイヤーの互換性のため
+        cmd = self._cmd(info, ffmpeg.ExportSettings(codec="h265", crf=22))
+        assert cmd[cmd.index("-c:v") + 1] == "libx265"
+        assert cmd[cmd.index("-tag:v") + 1] == "hvc1"
+        assert cmd[cmd.index("-crf") + 1] == "22"
+        # x265 の既定 preset (medium) は極端に遅く、エンコーダ待ちの
+        # タイムアウト(ENCODER_WAIT)に届きうるため速度優先にする
+        assert cmd[cmd.index("-preset") + 1] == "fast"
+
+    def test_scale_uses_computed_size(self):
+        uhd = ffmpeg.VideoInfo(3840, 2160, 30.0, "30/1", 90, 3.0, None)
+        cmd = self._cmd(uhd, ffmpeg.ExportSettings(max_short_side=1080))
+        assert cmd[cmd.index("-vf") + 1] == "scale=1920:1080"
+
+    def test_original_size_still_rounds_to_even(self):
+        odd = ffmpeg.VideoInfo(101, 57, 30.0, "30/1", 90, 3.0, None)
+        cmd = self._cmd(odd, ffmpeg.ExportSettings())
+        assert cmd[cmd.index("-vf") + 1] == "scale=100:56"
 
 
 class TestFfmpegDir:
