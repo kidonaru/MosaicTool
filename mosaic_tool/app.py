@@ -1466,6 +1466,8 @@ class MainWindow(QMainWindow):
                 self._fetcher.stop()
             if self._scrubber is not None:
                 self._scrubber.stop()
+            if self._thumbnailer is not None:
+                self._thumbnailer.stop()
             if self._detect_window is not None:
                 self._detect_window.close()
             self._worker.stop()
