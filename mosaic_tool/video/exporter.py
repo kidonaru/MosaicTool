@@ -6,7 +6,9 @@ ffmpeg のデコーダとエンコーダを 2 プロセス起動し、rawvideo �
 from __future__ import annotations
 
 import subprocess
+from heapq import heappop, heappush
 from pathlib import Path
+from typing import NamedTuple
 
 from PIL import Image
 from PySide6.QtCore import QThread, Signal
@@ -21,6 +23,67 @@ from mosaic_tool.video.ffmpeg import VideoInfo
 DECODER_WAIT = 60
 ENCODER_WAIT = 600
 KILL_WAIT = 10
+
+
+class _Entry(NamedTuple):
+    """索引が持つ区間 1 個。order は元のリストでの並び順"""
+
+    start: int
+    end: int
+    order: int
+    path: QPainterPath
+
+
+class FramePathIndex:
+    """フレーム番号から、そのフレームに掛かるパスを引く索引
+
+    自動検出は検出フレームごとに独立した区間を作るため、長尺動画では区間が
+    数万個まで増える。全区間の線形走査を全フレームに対して行うと書き出しが
+    (総フレーム数 × 区間数) に比例して遅くなる。
+
+    書き出しはフレーム 0 から順に進むので、開始フレーム順に並べた区間を掃引し、
+    「いま掛かっている区間」だけを終了フレーム順のヒープで保つ。1 フレーム分の
+    処理量は実際に掛かっている区間の数で決まるため、動画全体を覆うような長い
+    区間が混ざっても走査量が区間数に引きずられない。
+    (開始フレームの二分探索だけでは、長い区間が 1 本あるだけで打ち切りが
+    効かなくなり線形走査に戻ってしまう)
+
+    フレームが戻る呼び出しは書き出しでは起きないが、掃引の前提が崩れるため
+    その場合は掃引をやり直して正しい結果を返す。
+    """
+
+    def __init__(self, frame_paths: list[tuple[int, int, QPainterPath]]):
+        self._entries = sorted(
+            (
+                _Entry(start, end, order, path)
+                for order, (start, end, path) in enumerate(frame_paths)
+            ),
+            key=lambda e: e.start,
+        )
+        self._rewind()
+
+    def _rewind(self) -> None:
+        """掃引を先頭からやり直す"""
+        # まだ掃引していない区間の位置
+        self._next = 0
+        # いま掛かっている区間 (終了フレーム順のヒープ)
+        self._active: list[tuple[int, int, QPainterPath]] = []
+        self._frame: int | None = None
+
+    def paths_at(self, frame: int) -> list[QPainterPath]:
+        if self._frame is not None and frame < self._frame:
+            self._rewind()
+        self._frame = frame
+        entries = self._entries
+        while self._next < len(entries) and entries[self._next].start <= frame:
+            entry = entries[self._next]
+            heappush(self._active, (entry.end, entry.order, entry.path))
+            self._next += 1
+        # 終了フレーム順なので、掛からなくなった区間は先頭にまとまっている
+        while self._active and self._active[0][0] < frame:
+            heappop(self._active)
+        # 返す順は元のリスト順に戻す
+        return [path for _, _, path in sorted(self._active, key=lambda a: a[1])]
 
 
 class VideoExporter(QThread):
@@ -48,7 +111,7 @@ class VideoExporter(QThread):
         self._src = src
         self._dest = dest
         self._info = info
-        self._frame_paths = frame_paths
+        self._paths = FramePathIndex(frame_paths)
         self._block = block
         self._threshold = threshold
         self._strip_meta = strip_meta
@@ -67,7 +130,7 @@ class VideoExporter(QThread):
         self._kill(self._encoder)
 
     def _paths_at(self, frame: int) -> list[QPainterPath]:
-        return [p for start, end, p in self._frame_paths if start <= frame <= end]
+        return self._paths.paths_at(frame)
 
     def _read_frame(self, stdout) -> bytes:
         """rawvideo 1 フレーム分を読み切る。EOF なら空、途切れたら VideoError"""
