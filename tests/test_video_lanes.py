@@ -149,6 +149,63 @@ class TestBuildRowsWithLane:
         assert [len(row.items) for row in rows] == [1, 0, 1]
 
 
+def box(x, y, size=10):
+    """位置指定の外接矩形。x が離れているものは重ならない"""
+    return QRectF(x, y, size, size)
+
+
+class TestPlaceLanesWithRects:
+    def test_two_tracks_keep_lanes_when_input_order_swaps(self):
+        # 同一フレームの 2 対象。次フレームで検出順が入れ替わっても行は保つ
+        intervals = [(0, 4), (0, 4), (5, 9), (5, 9)]
+        rects = [box(0, 0), box(100, 0), box(101, 0), box(1, 0)]
+        assigned = place_lanes(intervals, [None] * 4, rects)
+        assert assigned[0] == assigned[3]
+        assert assigned[1] == assigned[2]
+        assert assigned[0] != assigned[1]
+
+    def test_continues_the_lane_with_the_higher_iou(self):
+        # lane0 が (0,0)、lane1 が (100,0)。新区間は lane1 の続きになる
+        intervals = [(0, 4), (0, 4), (5, 9)]
+        rects = [box(0, 0), box(100, 0), box(100, 0)]
+        assert place_lanes(intervals, [None] * 3, rects) == [0, 1, 1]
+
+    def test_no_overlap_falls_back_to_top_lane(self):
+        # どのレーンとも重ならない新しい対象は最上段の空きへ
+        intervals = [(0, 4), (0, 4), (5, 9)]
+        rects = [box(0, 0), box(100, 0), box(200, 0)]
+        assert place_lanes(intervals, [None] * 3, rects) == [0, 1, 0]
+
+    def test_gap_breaks_continuation(self):
+        # フレーム 5 が空くので隣接せず、継続扱いにしない
+        intervals = [(0, 4), (0, 4), (6, 10)]
+        rects = [box(0, 0), box(100, 0), box(100, 0)]
+        assert place_lanes(intervals, [None] * 3, rects) == [0, 1, 0]
+
+    def test_manual_lane_wins_over_continuation(self):
+        # 手動指定は継続マッチより優先される
+        intervals = [(0, 4), (0, 4), (5, 9)]
+        rects = [box(0, 0), box(100, 0), box(100, 0)]
+        assert place_lanes(intervals, [None, None, 0], rects) == [0, 1, 0]
+
+    def test_rects_none_keeps_previous_behaviour(self):
+        # 矩形を渡さなければ従来どおり最上段詰め
+        intervals = [(0, 4), (0, 4), (5, 9)]
+        assert place_lanes(intervals, [None] * 3) == [0, 1, 0]
+
+    def test_many_tracks_stay_separated_fast(self):
+        # 自動検出相当: 2 対象 × 1000 フレーム分でも 2 レーンに収まる
+        intervals = []
+        rects = []
+        for f in range(0, 5000, 5):
+            intervals += [(f, f + 4), (f, f + 4)]
+            rects += [box(0, 0), box(100, 0)]
+        assigned = place_lanes(intervals, [None] * len(intervals), rects)
+        assert max(assigned) == 1
+        assert assigned[0::2] == [assigned[0]] * (len(intervals) // 2)
+        assert assigned[1::2] == [assigned[1]] * (len(intervals) // 2)
+
+
 class TestClampLaneDelta:
     def test_empty_is_zero(self):
         assert clamp_lane_delta([], [], 3) == 0
