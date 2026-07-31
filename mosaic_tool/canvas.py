@@ -122,6 +122,14 @@ class MosaicOverlay(QGraphicsItem):
         if self._mosaic_pixmap is None or self._clip.isEmpty():
             return
         painter.setClipPath(self._clip)
+        if self._mosaic_pixmap.size() != self._rect.size().toSize():
+            # 再生中はプロキシ解像度の pixmap が来る。マス目をぼかさないよう
+            # 補間を切ってシーン矩形へ伸ばす
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+            painter.drawPixmap(
+                self._rect, self._mosaic_pixmap, QRectF(self._mosaic_pixmap.rect())
+            )
+            return
         painter.drawPixmap(0, 0, self._mosaic_pixmap)
 
 
@@ -430,6 +438,7 @@ class MosaicCanvas(QGraphicsView):
         self._block = 10
         self._threshold = 0.0  # マス単位判定のしきい値(被覆率 0.0〜1.0)
         self._preview = False  # プレビュー(アウトライン非表示)中か
+        self._playback = False  # 再生中か(範囲の作成・選択・変形を止める)
         self._loading = False
         self._undo_stack: list[tuple] = []
         self._panning = False
@@ -452,6 +461,8 @@ class MosaicCanvas(QGraphicsView):
         self._image = img
         pm = pil_to_qpixmap(img)
         self._pixmap_item = self._scene.addPixmap(pm)
+        # 再生で付いたプロキシの拡大を戻す(原寸の pixmap をそのまま表示する)
+        self._pixmap_item.setTransform(QTransform())
         self._scene.setSceneRect(QRectF(pm.rect()))
         self._overlay = MosaicOverlay(QRectF(pm.rect()))
         self._overlay.setZValue(1)
@@ -592,6 +603,77 @@ class MosaicCanvas(QGraphicsView):
         for item in self._region_items():
             item.set_preview(on)
 
+    def set_playback_image(self, image: QImage) -> None:
+        """再生中のフレームを差し替える(シーン構成・ズーム・範囲は保つ)
+
+        set_image はシーンを作り直し表示倍率も戻すため毎フレームには使えない。
+        プロキシ解像度の画像はアイテムの変換でシーン矩形へ伸ばす(拡大縮小した
+        pixmap を作り直すより軽い)。
+        """
+        if self._pixmap_item is None or self._image is None:
+            return
+        self._pixmap_item.setPixmap(QPixmap.fromImage(image))
+        width, height = self._image.size
+        transform = QTransform()
+        if image.width() != width or image.height() != height:
+            transform.scale(width / image.width(), height / image.height())
+        self._pixmap_item.setTransform(transform)
+        self._rebuild_playback_mosaic(image)
+
+    def _rebuild_playback_mosaic(self, image: QImage) -> None:
+        """再生中のモザイクをフレームに追従させる(簡易リアルタイム処理)
+
+        マス数ぶんに縮めた画像をそのまま渡し、原寸への引き伸ばしは
+        オーバーレイの補間なし描画に任せる(毎フレーム呼ぶため拡大を省く)。
+        ブロックサイズはプロキシ倍率で換算した近似値になる(正確な仕上がりは
+        静止状態のプレビューと書き出しで確認する)。
+        """
+        if self._overlay is None or self._image is None:
+            return
+        scale = image.width() / self._image.size[0]
+        block = max(1, round(self._block * scale))
+        if block <= 1:
+            self._overlay.set_mosaic(QPixmap.fromImage(image))
+            return
+        small = image.scaled(
+            max(1, image.width() // block),
+            max(1, image.height() // block),
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._overlay.set_mosaic(QPixmap.fromImage(small))
+
+    def set_playback_regions(self, regions: list[Region]) -> None:
+        """再生中に表示する範囲を差し替える(Undo は積まず、未保存扱いにもしない)
+
+        クリップ形状の作り直しは重いため、掛かる範囲の集合が変わったときだけ行う。
+        """
+        wanted = {id(r): r for r in regions}
+        current = {id(item.region): item for item in self._region_items()}
+        if wanted.keys() == current.keys():
+            return
+        # regions_changed を出さないよう読み込み中として扱う
+        self._loading = True
+        try:
+            for key, item in current.items():
+                if key not in wanted:
+                    self._scene.removeItem(item)
+            for key, region in wanted.items():
+                if key not in current:
+                    self.add_region(region, push_undo=False)
+        finally:
+            self._loading = False
+        self._update_clip()
+
+    def set_playback_mode(self, on: bool) -> None:
+        """再生中の切替(範囲の作成・選択・変形を止める。枠線は描いたまま)"""
+        self._playback = on
+        if on:
+            self._scene.clearSelection()
+        for item in self._region_items():
+            item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, not on)
+            item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, not on)
+
     def add_region(self, region: Region, push_undo: bool = True) -> RegionItem:
         item = RegionItem(region)
         item.setZValue(2)
@@ -605,6 +687,9 @@ class MosaicCanvas(QGraphicsView):
         if push_undo:
             self._undo_stack.append(("add", item))
         self._refresh_overlay()
+        if self._playback:
+            item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+            item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
         return item
 
     def add_regions(self, regions: list[Region]) -> list[RegionItem]:
@@ -806,6 +891,7 @@ class MosaicCanvas(QGraphicsView):
         can_create = (
             event.button() == Qt.MouseButton.LeftButton
             and not self._preview
+            and not self._playback
             and self._is_on_image(event.position().toPoint())
         )
         # 矩形モード: ドラッグで矩形範囲を作成

@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from PIL import Image
-from PySide6.QtCore import QProcess, Qt
+from PySide6.QtCore import QProcess, Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -37,14 +37,20 @@ from mosaic_tool.regions import Region, drop_duplicate_regions
 from mosaic_tool.settings import AppSettings
 from mosaic_tool.version import APP_NAME, __version__
 from mosaic_tool.video import ffmpeg as video_ffmpeg
+from mosaic_tool.video.detect_range_dialog import DetectRangeDialog, detect_frame_count
 from mosaic_tool.video.exporter import VideoExporter
+from mosaic_tool.video.frame_fetcher import FrameFetcher
 from mosaic_tool.video.merge import Detection, merge_detections, parse_detection
+from mosaic_tool.video.player import VideoPlayer
+from mosaic_tool.video.scrubber import Scrubber
 from mosaic_tool.video.session import VideoSession
 from mosaic_tool.video.setup_dialog import VideoSetupDialog
 from mosaic_tool.video.timeline import TimelineBar
 from mosaic_tool.video.timeline_window import TimelineWindow
 
 TITLE = f"{APP_NAME} v{__version__}"
+# シークが止まってから原寸フレームへ描き直すまでの待ち (ms)
+SEEK_SETTLE_MS = 200
 BLOCK_STEP = 5      # モザイクサイズの刻み幅 (px)
 BLOCK_MAX = 100     # モザイクサイズの上限 (px)
 BLOCK_SLIDER_WIDTH = 100  # モザイクサイズのスライダー幅 (px)
@@ -68,6 +74,8 @@ class _VideoDetectState:
     step: int
     dir: Path
     proc: QProcess
+    start: int = 0   # 検出範囲の開始フレーム
+    end: int = 0     # 同終了フレーム(区間末尾のクランプに使う)
     files: list[Path] = field(default_factory=list)
     idx: int = 0
     dets: list[Detection] = field(default_factory=list)
@@ -100,6 +108,8 @@ class MainWindow(QMainWindow):
         self._timeline = TimelineBar(self)
         self._timeline.hide()
         self._timeline.frame_changed.connect(self._on_frame_changed)
+        self._timeline.play_clicked.connect(self._toggle_playback)
+        self._timeline.speed_changed.connect(self._on_playback_speed_changed)
         layout.addWidget(self._timeline)
         self.setCentralWidget(container)
         self.canvas.regions_changed.connect(self._on_regions_changed)
@@ -136,6 +146,21 @@ class MainWindow(QMainWindow):
         self._export_dialog: QProgressDialog | None = None
         # 動画への自動検出の実行状態(None なら未実行)
         self._video_detect: _VideoDetectState | None = None
+        # 検出範囲ダイアログの検出間隔(セッション中だけ引き継ぐ)
+        self._detect_step = 1
+        # 再生の状態(None なら未再生。動画を閉じるまで使い回す)
+        self._player: VideoPlayer | None = None
+        # シーク用のフレーム取り出しスレッド(動画を閉じるまで使い回す)
+        self._fetcher: FrameFetcher | None = None
+        # スクラブ用のプロキシフレーム取り出しスレッド(動画を閉じるまで使い回す)
+        self._scrubber: Scrubber | None = None
+        # 表示したいフレーム(シーク中は最後に要求した位置)
+        self._seek_frame = 0
+        # シークが止まったら原寸フレームへ描き直すためのデバウンス
+        self._settle_timer = QTimer(self)
+        self._settle_timer.setSingleShot(True)
+        self._settle_timer.setInterval(SEEK_SETTLE_MS)
+        self._settle_timer.timeout.connect(self._on_seek_settled)
 
         self._build_toolbar()
         if paths:
@@ -259,6 +284,10 @@ class MainWindow(QMainWindow):
         self._add_shortcut(self._preview_act, QKeySequence(Qt.Key.Key_Tab))
         self._preview_act.toggled.connect(self.canvas.set_preview_mode)
         tb.addAction(self._preview_act)
+        # 再生/一時停止。ツールバーには出さず Space のショートカットとしてだけ持つ
+        self._playback_act = QAction("再生", self)
+        self._add_shortcut(self._playback_act, QKeySequence(Qt.Key.Key_Space))
+        self._playback_act.triggered.connect(self._toggle_playback)
         tb.add_separator()
         # 自動検出: 専用ウィンドウでモデルと信頼度を選んでから実行する
         self._detect_act = QAction("自動検出", self)
@@ -714,6 +743,8 @@ class MainWindow(QMainWindow):
 
     def _reject_while_video_busy(self) -> bool:
         """動画の書き出し・全編検出中の操作を断る(断ったら True)"""
+        # 再生中の操作は再生を止めてから通す(書き出し・検出とは違い待たせない)
+        self._stop_playback()
         if self._exporter is not None:
             self.statusBar().showMessage("動画を書き出し中です", 5000)
             return True
@@ -726,6 +757,15 @@ class MainWindow(QMainWindow):
         """動画モードを畳む(未保存確認は呼び出し側)"""
         if self._video is None:
             return
+        self._stop_playback()
+        self._player = None
+        self._settle_timer.stop()
+        if self._fetcher is not None:
+            self._fetcher.stop()
+            self._fetcher = None
+        if self._scrubber is not None:
+            self._scrubber.stop()
+            self._scrubber = None
         self._video = None
         self._timeline.hide()
         self._timeline_act.setEnabled(False)
@@ -754,6 +794,7 @@ class MainWindow(QMainWindow):
         self._timeline.set_range(info.frame_count)
         self._timeline.set_frame(0)
         self._timeline.show()
+        self._player = None
         self._show_frame(0)
         self._timeline_act.setEnabled(True)
         self._show_timeline_window()
@@ -767,16 +808,45 @@ class MainWindow(QMainWindow):
         )
 
     def _show_frame(self, frame: int) -> None:
-        """指定フレームを取り出してキャンバスへ表示する"""
+        """指定フレームの取り出しを頼む(表示は _on_frame_fetched で行う)
+
+        取り出しは 1 回に 100ms 以上かかるため同期実行はしない。ドラッグ中の
+        連続シークはフェッチャー側で最新の 1 件へまとめられる。
+        """
+        fetcher = self._ensure_fetcher()
+        if fetcher is not None:
+            self._seek_frame = frame
+            fetcher.request(frame)
+
+    def _ensure_fetcher(self) -> FrameFetcher | None:
+        """フレーム取り出しスレッドを遅延生成して返す(動画モードでなければ None)"""
+        video = self._video
+        if video is None:
+            return None
+        if self._fetcher is None:
+            fetcher = FrameFetcher(video.path, video.info, self)
+            fetcher.frame_ready.connect(self._on_frame_fetched)
+            fetcher.failed.connect(self._on_frame_fetch_failed)
+            fetcher.start()
+            self._fetcher = fetcher
+        return self._fetcher
+
+    def _on_frame_fetched(self, frame: int, data: bytes) -> None:
+        """取り出せたフレームをキャンバスへ表示する"""
         video = self._video
         if video is None:
             return
+        # 再生が始まっていたら静止フレームで上書きしない(停止時に描き直される)
+        if self._is_playing():
+            return
+        # 取り出している間にシークが進んでいたら、古い原寸フレームは表示しない
+        if frame != self._seek_frame:
+            return
         try:
-            data = video_ffmpeg.extract_frame(video.path, frame, video.info)
             img = Image.open(io.BytesIO(data))
             img.load()
-        except (video_ffmpeg.VideoError, OSError) as e:
-            QMessageBox.warning(self, "読み込みエラー", f"フレームを表示できません\n{e}")
+        except OSError as e:
+            self.statusBar().showMessage(f"フレームを表示できません: {e}", 5000)
             return
         # 表示するのはこのフレームに掛かる範囲だけ。区間外へ移動した範囲は
         # 選択ごと外れる(区間の調整はタイムラインウィンドウで行う)
@@ -785,20 +855,139 @@ class MainWindow(QMainWindow):
         self.canvas.set_image(img, video.regions_at(frame))
         self.canvas.setFocus()
 
+    def _on_frame_fetch_failed(self, frame: int, message: str) -> None:
+        # シーク中は要求ごとに失敗し得るため、モーダルではなくステータスバーで知らせる
+        self.statusBar().showMessage(
+            f"フレームを表示できません (frame {frame}): {message}", 5000
+        )
+
     def _on_frame_changed(self, frame: int) -> None:
-        """タイムラインのシークに合わせて表示を切り替える"""
+        """タイムラインのシークに合わせて表示を切り替える
+
+        追従表示は再生と同じプロキシパイプ(スクラバー)で行い、シークが
+        止まってから原寸フレームへ描き直す(編集は原寸画像が前提のため)。
+        """
         if self._video is None:
             return
         # 表示中フレームでの編集を区間リストへ反映してから移動する
         self._sync_video_regions()
-        self._show_frame(frame)
+        self._seek_frame = frame
+        scrubber = self._ensure_scrubber()
+        if scrubber is not None:
+            scrubber.request(frame)
+        self._settle_timer.start()
         self._update_timeline_window()
         if self._timeline_window is not None:
             self._timeline_window.set_frame(frame)
 
+    def _ensure_scrubber(self) -> Scrubber | None:
+        """スクラブ用スレッドを遅延生成して返す(動画モードでなければ None)"""
+        video = self._video
+        if video is None:
+            return None
+        if self._scrubber is None:
+            scrubber = Scrubber(video.path, video.info, self)
+            scrubber.frame_ready.connect(self._on_scrub_frame)
+            scrubber.failed.connect(self._on_frame_fetch_failed)
+            scrubber.start()
+            self._scrubber = scrubber
+        return self._scrubber
+
+    def _on_scrub_frame(self, frame: int, image) -> None:
+        """スクラブ中のプロキシフレームを表示する(再生ヘッドは要求位置のまま)"""
+        video = self._video
+        if video is None:
+            return
+        if self._is_playing():
+            return
+        video.frame = frame
+        self.canvas.set_playback_regions(video.regions_at(frame))
+        self.canvas.set_playback_image(image)
+
+    def _on_seek_settled(self) -> None:
+        """シークが止まったので原寸フレームへ描き直す"""
+        if self._video is None:
+            return
+        if self._is_playing():
+            return
+        self._show_frame(self._seek_frame)
+
     def _sync_video_regions(self) -> None:
         if self._video is not None:
             self._video.sync_from_canvas(self.canvas.get_regions())
+
+    # --- 再生 ---
+
+    def _ensure_player(self) -> VideoPlayer | None:
+        """再生エンジンを遅延生成して返す(動画モードでなければ None)"""
+        video = self._video
+        if video is None:
+            return None
+        if self._player is None:
+            player = VideoPlayer(video.path, video.info, self)
+            player.frame_ready.connect(self._on_playback_frame)
+            player.finished.connect(self._on_playback_finished)
+            player.failed.connect(self._on_playback_failed)
+            self._player = player
+        return self._player
+
+    def _is_playing(self) -> bool:
+        """再生エンジンが動作中か(未生成なら False)"""
+        return self._player is not None and self._player.is_playing()
+
+    def _toggle_playback(self) -> None:
+        """再生中なら止め、そうでなければ現在フレームから再生する"""
+        video = self._video
+        if video is None or self._exporter is not None or self._video_detect is not None:
+            return
+        player = self._ensure_player()
+        if player is None:
+            return
+        if player.is_playing():
+            self._stop_playback()
+            return
+        # 表示中フレームでの編集を区間リストへ反映してから再生へ移る
+        self._sync_video_regions()
+        self.canvas.set_playback_mode(True)
+        player.set_speed(self._timeline.speed())
+        self._timeline.set_playing(True)
+        player.start(video.frame)
+
+    def _stop_playback(self) -> None:
+        """再生を止めて編集できる状態(原寸フレーム)へ戻す"""
+        player = self._player
+        if player is None or not player.is_playing():
+            return
+        player.stop()
+        self._timeline.set_playing(False)
+        self.canvas.set_playback_mode(False)
+        if self._video is not None:
+            # プロキシ解像度のまま編集させないよう原寸で描き直す
+            self._show_frame(self._video.frame)
+
+    def _on_playback_speed_changed(self, speed: float) -> None:
+        """速度コンボの変更を再生中のエンジンへ渡す(未再生なら次の再生から効く)"""
+        if self._player is not None:
+            self._player.set_speed(speed)
+
+    def _on_playback_frame(self, frame: int, image) -> None:
+        """再生中の 1 フレームを表示し、再生ヘッドを進める"""
+        video = self._video
+        if video is None:
+            return
+        video.frame = frame
+        self.canvas.set_playback_regions(video.regions_at(frame))
+        self.canvas.set_playback_image(image)
+        self._timeline.set_frame(frame)
+        if self._timeline_window is not None:
+            self._timeline_window.set_frame(frame)
+
+    def _on_playback_finished(self) -> None:
+        self._stop_playback()
+
+    def _on_playback_failed(self, message: str) -> None:
+        self._stop_playback()
+        QMessageBox.warning(self, "再生エラー", message)
 
     # --- タイムラインウィンドウ ---
 
@@ -810,6 +999,7 @@ class MainWindow(QMainWindow):
             window.interval_edited.connect(self._on_timeline_interval_edited)
             window.region_clicked.connect(self._on_timeline_region_clicked)
             window.delete_requested.connect(self._on_timeline_delete)
+            window.playback_toggle_requested.connect(self._toggle_playback)
             self._timeline_window = window
         return self._timeline_window
 
@@ -929,32 +1119,46 @@ class MainWindow(QMainWindow):
     # --- 動画への自動検出 ---
 
     def _start_video_detect(self, models: dict) -> None:
-        """全編のフレームを取り出し、順に検出して区間つき範囲を作る"""
+        """指定範囲のフレームを取り出し、順に検出して区間つき範囲を作る"""
         video = self._video
         if video is None or self._worker.is_busy() or self._reject_while_video_busy():
             return
-        step = self._timeline.detect_step()
-        total = (video.info.frame_count + step - 1) // step
-        ret = QMessageBox.question(
-            self,
-            "確認",
-            f"動画の全編 (約 {total} フレーム) に自動検出を行います。\n"
-            "よろしいですか?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        if not video_ffmpeg.is_ffmpeg_ready():
+            QMessageBox.critical(
+                self,
+                "検出エラー",
+                "動画の処理に使う ffmpeg がありません。\n"
+                "動画を開き直してセットアップし直してください。",
+            )
+            return
+        dialog = DetectRangeDialog(
+            video.info.frame_count, video.info.fps, video.frame, self._detect_step, self
         )
-        if ret != QMessageBox.StandardButton.Yes:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        start, end, step = dialog.range_result()
+        self._detect_step = step
+        count = detect_frame_count(start, end, step)
+        if count <= 0:
             return
         tmp = Path(tempfile.mkdtemp(prefix="mosaic_vdetect_"))
         proc = QProcess(self)
         proc.finished.connect(self._on_frames_extracted)
+        # 起動に失敗した QProcess は finished を出さないため、別途受ける
+        proc.errorOccurred.connect(self._on_frames_extract_error)
         self._video_detect = _VideoDetectState(
-            models=models, step=step, dir=tmp, proc=proc
+            models=models, step=step, dir=tmp, proc=proc, start=start, end=end
         )
         if self._detect_window is not None:
             self._detect_window.set_running(True)
         self.statusBar().showMessage("フレームを展開中...")
         cmd = video_ffmpeg.extract_frames_command(
-            video.path, video.info, step, str(tmp / "frame_%06d.jpg")
+            video.path,
+            video.info,
+            step,
+            str(tmp / "frame_%06d.jpg"),
+            start=start,
+            count=count,
         )
         proc.start(cmd[0], cmd[1:])
 
@@ -973,6 +1177,24 @@ class MainWindow(QMainWindow):
         state.files = files
         self._request_video_detect_at(0)
 
+    def _on_frames_extract_error(self, error) -> None:
+        """ffmpeg のプロセスが異常を起こしたら待ち表示を畳む
+
+        起動できなかった場合は finished が来ず、そのままでは検出中の表示のまま
+        操作を受け付けなくなる。
+        """
+        if self._video_detect is None:
+            return
+        self._finish_video_detect("")
+        failed_to_start = error == QProcess.ProcessError.FailedToStart
+        QMessageBox.critical(
+            self,
+            "検出エラー",
+            "フレームの展開を開始できませんでした"
+            if failed_to_start
+            else "フレームの展開に失敗しました",
+        )
+
     def _request_video_detect_at(self, index: int) -> None:
         state = self._video_detect
         total = len(state.files)
@@ -990,7 +1212,7 @@ class MainWindow(QMainWindow):
         state = self._video_detect
         if state is None or self._video is None:
             return
-        frame = state.idx * state.step
+        frame = state.start + state.idx * state.step
         for det in detections:
             parsed = parse_detection(det, frame)
             if parsed is not None:
@@ -1002,7 +1224,8 @@ class MainWindow(QMainWindow):
         intervals = merge_detections(
             state.dets,
             step=state.step,
-            total_frames=self._video.info.frame_count,
+            # 区間の末尾伸長が検出範囲の外へ出ないようクランプする
+            total_frames=state.end + 1,
         )
         added = self._video.add_intervals(intervals)
         if added:
@@ -1066,6 +1289,11 @@ class MainWindow(QMainWindow):
                 self._exporter.cancel()
                 self._exporter.wait()
             self._cleanup_video_detect()
+            self._stop_playback()
+            if self._fetcher is not None:
+                self._fetcher.stop()
+            if self._scrubber is not None:
+                self._scrubber.stop()
             if self._detect_window is not None:
                 self._detect_window.close()
             self._worker.stop()

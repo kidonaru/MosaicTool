@@ -1,7 +1,8 @@
 """動画対応の ffmpeg まわり: パス解決・probe 解析・コマンド組み立て(GUI 非依存)
 
-ffmpeg / ffprobe は同梱せず、セットアップ時に runtime/ffmpeg/ へダウンロードする
-(推論ランタイムと同じ方針。配布物のサイズとライセンスへの影響を避けるため)。
+ffmpeg / ffprobe は同梱せず、セットアップ時に ffmpeg/ へダウンロードする
+(配布物のサイズとライセンスへの影響を避けるため)。置き場は推論ランタイムの
+runtime/ とは分ける(理由は ffmpeg_dir を参照)。
 """
 from __future__ import annotations
 
@@ -11,7 +12,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from mosaic_tool.detect.paths import runtime_dir
+from mosaic_tool.detect.paths import base_dir
 
 # 対応する動画拡張子
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".wmv", ".mpg", ".mpeg"}
@@ -23,6 +24,10 @@ MP4_COPY_AUDIO = {"aac", "mp3", "ac3", "eac3"}
 
 # 書き出しの H.264 品質 (CRF。小さいほど高品質)
 ENCODE_CRF = 18
+
+# 再生プレビューの横幅上限 (px)。1080p 以下は原寸のまま再生し、4K などは
+# 縮めてパイプの帯域を抑える(4K 原寸の rawvideo はデコードが実時間に届かない)
+PROXY_MAX_WIDTH = 1920
 
 # probe は読むだけなので短め、フレーム抽出は後方フレームへのシークを見込んで長め (秒)
 PROBE_TIMEOUT = 60
@@ -47,7 +52,12 @@ def _exe(name: str) -> str:
 
 
 def ffmpeg_dir() -> Path:
-    return runtime_dir() / FFMPEG_DIR_NAME
+    """ffmpeg / ffprobe の置き場
+
+    推論環境のセットアップは runtime/ を uv venv --clear で作り直すため、
+    その配下に置くと巻き添えで消える。runtime/ と並べて別に持つ。
+    """
+    return base_dir() / FFMPEG_DIR_NAME
 
 
 def ffmpeg_path() -> Path:
@@ -171,19 +181,65 @@ def extract_frame_command(src: Path, index: int, info: VideoInfo) -> list[str]:
 
 
 def extract_frames_command(
-    src: Path, info: VideoInfo, step: int, out_pattern: str
+    src: Path,
+    info: VideoInfo,
+    step: int,
+    out_pattern: str,
+    *,
+    start: int = 0,
+    count: int | None = None,
 ) -> list[str]:
     """検出用に step フレームおきの JPEG を out_pattern へ書き出すコマンド
 
-    連番の k 枚目(1 始まり)は正規化後のフレーム (k-1) * step に対応する。
+    start から count 枚だけ取り出す。連番の k 枚目(1 始まり)は
+    正規化後のフレーム start + (k-1) * step に対応する。
+    -ss は extract_frame_command と同じく前フレームとの中間時刻を指し、
+    丸め誤差で隣のフレームから始まらないようにする。
     """
     filters = _fps_filter(info)
     if step > 1:
         filters += f",select='not(mod(n\\,{step}))'"
+    time = max(0.0, (start - 0.5) / info.fps)
+    cmd = [
+        str(ffmpeg_path()), "-v", "error",
+        "-ss", f"{time:.6f}", "-i", str(src),
+        "-vf", filters, "-fps_mode", "vfr",
+    ]
+    if count is not None:
+        cmd += ["-frames:v", str(count)]
+    cmd += ["-q:v", "2", out_pattern]
+    return cmd
+
+
+def proxy_size(info: VideoInfo, max_width: int = PROXY_MAX_WIDTH) -> tuple[int, int]:
+    """再生プレビューの描画サイズ。max_width を上限に縦横比を保った偶数サイズ
+
+    偶数へ丸めるのは scale フィルタと相性を取るため。プロキシはシーン矩形へ
+    伸ばして表示するので、1px の切り詰めは表示に影響しない。
+    """
+    if info.width <= max_width:
+        width, height = info.width, info.height
+    else:
+        width = max_width
+        height = max(1, round(info.height * max_width / info.width))
+    return max(2, width - width % 2), max(2, height - height % 2)
+
+
+def playback_command(
+    src: Path, info: VideoInfo, start: int, size: tuple[int, int]
+) -> list[str]:
+    """再生用に start 以降を rawvideo (RGB24) として標準出力へ流し続けるコマンド
+
+    1 フレームは幅 × 高さ × 3 バイト固定なので、読み出し側はフレーム境界を
+    解析せずに切り出せる。
+    """
+    time = max(0.0, (start - 0.5) / info.fps)
+    width, height = size
     return [
         str(ffmpeg_path()), "-v", "error",
-        "-i", str(src), "-vf", filters, "-fps_mode", "vfr",
-        "-q:v", "2", out_pattern,
+        "-ss", f"{time:.6f}", "-i", str(src),
+        "-vf", f"{_fps_filter(info)},scale={width}:{height}",
+        "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
     ]
 
 

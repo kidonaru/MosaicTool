@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from mosaic_tool.detect import paths
 from mosaic_tool.video import ffmpeg
 
 
@@ -105,6 +106,51 @@ class TestCommands:
         vf = cmd[cmd.index("-vf") + 1]
         assert "select" not in vf
 
+    def test_extract_frames_seeks_to_the_start_frame(self, info):
+        # 前フレームとの中間時刻へシークする(extract_frame_command と同じ方式)
+        cmd = ffmpeg.extract_frames_command(
+            Path("in.mp4"), info, 1, "out_%06d.jpg", start=60
+        )
+        assert cmd.index("-ss") < cmd.index("-i")
+        assert float(cmd[cmd.index("-ss") + 1]) == pytest.approx(59.5 / info.fps)
+
+    def test_extract_frames_limits_the_count(self, info):
+        cmd = ffmpeg.extract_frames_command(
+            Path("in.mp4"), info, 5, "out_%06d.jpg", start=10, count=7
+        )
+        assert cmd[cmd.index("-frames:v") + 1] == "7"
+
+    def test_extract_frames_without_count_has_no_limit(self, info):
+        cmd = ffmpeg.extract_frames_command(Path("in.mp4"), info, 1, "out_%06d.jpg")
+        assert "-frames:v" not in cmd
+
+    def test_extract_frames_from_the_head_seeks_to_zero(self, info):
+        cmd = ffmpeg.extract_frames_command(Path("in.mp4"), info, 1, "out_%06d.jpg")
+        assert float(cmd[cmd.index("-ss") + 1]) == 0.0
+
+    def test_playback_command_streams_rawvideo_from_the_start_frame(self):
+        info = ffmpeg.VideoInfo(1920, 1080, 30.0, "30/1", 900, 30.0, None)
+        cmd = ffmpeg.playback_command(Path("in.mp4"), info, 300, (960, 540))
+        assert cmd.index("-ss") < cmd.index("-i")
+        assert float(cmd[cmd.index("-ss") + 1]) == pytest.approx(299.5 / 30.0)
+        assert "scale=960:540" in cmd[cmd.index("-vf") + 1]
+        assert cmd[cmd.index("-f") + 1] == "rawvideo"
+        assert cmd[cmd.index("-pix_fmt") + 1] == "rgb24"
+        assert cmd[-1] == "-"
+
+    def test_proxy_size_keeps_small_video_as_is(self):
+        info = ffmpeg.VideoInfo(640, 480, 30.0, "30/1", 90, 3.0, None)
+        assert ffmpeg.proxy_size(info) == (640, 480)
+
+    def test_proxy_size_shrinks_to_the_max_width(self):
+        info = ffmpeg.VideoInfo(1920, 1080, 30.0, "30/1", 90, 3.0, None)
+        assert ffmpeg.proxy_size(info, 960) == (960, 540)
+
+    def test_proxy_size_is_even(self):
+        # 奇数サイズは 1px 切り詰める(プロキシは伸ばして表示するため影響しない)
+        info = ffmpeg.VideoInfo(101, 57, 30.0, "30/1", 90, 3.0, None)
+        assert ffmpeg.proxy_size(info, 960) == (100, 56)
+
     def test_encode_copies_compatible_audio(self, info):
         cmd = ffmpeg.encode_command(Path("in.mp4"), Path("out.mp4"), info, strip_meta=False)
         assert cmd[cmd.index("-c:a") + 1] == "copy"
@@ -125,3 +171,11 @@ class TestCommands:
     def test_encode_strip_meta(self, info):
         cmd = ffmpeg.encode_command(Path("in.mp4"), Path("out.mp4"), info, strip_meta=True)
         assert cmd[cmd.index("-map_metadata") + 1] == "-1"
+
+
+class TestFfmpegDir:
+    def test_is_outside_the_inference_runtime(self, tmp_path, monkeypatch):
+        """推論環境のセットアップ(uv venv --clear)で消えない場所に置くこと"""
+        monkeypatch.setattr("mosaic_tool.video.ffmpeg.base_dir", lambda: tmp_path)
+        monkeypatch.setattr("mosaic_tool.detect.paths.base_dir", lambda: tmp_path)
+        assert paths.runtime_dir() not in ffmpeg.ffmpeg_dir().parents

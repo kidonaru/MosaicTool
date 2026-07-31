@@ -24,6 +24,11 @@ ZOOM_STEP = 1.25
 # 目盛りのラベルをおおよそこの間隔で置く (px)
 TICK_LABEL_PX = 80
 
+# 副目盛りの最小間隔 (px)。これより詰まる分割は使わない
+MIN_MINOR_PX = 8
+# 副目盛りの分割数(細かい順に試す)
+_MINOR_DIVISORS = (10, 5, 2)
+
 # バーの端をつかめる判定幅 (px / 片側)
 HANDLE_PX = 5
 
@@ -42,6 +47,8 @@ _BAR_COLOR = QColor(0x6E, 0x9E, 0xD8)
 _SELECTED_COLOR = QColor(0x4D, 0xA3, 0xFF)
 _HANDLE_COLOR = QColor(0xFF, 0xFF, 0xFF)
 _PLAYHEAD_COLOR = QColor(0xFF, 0x50, 0x50)
+_GRID_MAJOR = QColor(0x3C, 0x3C, 0x3C)  # 主目盛りの縦線
+_GRID_MINOR = QColor(0x33, 0x33, 0x33)  # 副目盛りの縦線
 
 
 def _tick_interval(px_per_frame: float) -> int:
@@ -56,6 +63,21 @@ def _tick_interval(px_per_frame: float) -> int:
     return step
 
 
+def _minor_interval(major: int, px_per_frame: float) -> int:
+    """主目盛りを分割した副目盛りの幅
+
+    割り切れて、かつ間隔が MIN_MINOR_PX 以上になる最も細かい分割を選ぶ。
+    分割できなければ major をそのまま返す(この場合は副目盛りを描かない)。
+    """
+    for divisor in _MINOR_DIVISORS:
+        if major % divisor:
+            continue
+        minor = major // divisor
+        if minor * px_per_frame >= MIN_MINOR_PX:
+            return minor
+    return major
+
+
 class TimelineArea(QWidget):
     """タイムライン本体。ルーラー・カテゴリ行・区間バー・再生ヘッドを自前描画する"""
 
@@ -64,6 +86,8 @@ class TimelineArea(QWidget):
     region_clicked = Signal(object, int)      # (Region, クリック位置のフレーム)
     delete_requested = Signal(object)         # (Region) 選択中バーの削除要求
     scroll_requested = Signal(int)            # ズーム時のアンカー補正スクロール量
+    hscroll_requested = Signal(int)           # ホイールによる横スクロール量(相対 px)
+    playback_toggle_requested = Signal()      # Space による再生/一時停止の要求
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -237,6 +261,10 @@ class TimelineArea(QWidget):
         return max(0, self._total - 1)
 
     def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Space:
+            self.playback_toggle_requested.emit()
+            event.accept()
+            return
         if (
             event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace)
             and self._selected is not None
@@ -247,20 +275,31 @@ class TimelineArea(QWidget):
         super().keyPressEvent(event)
 
     def wheelEvent(self, event) -> None:
-        """Ctrl + ホイールで横方向にズームする(カーソル下のフレームを固定)"""
-        if not event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+        """Ctrl+ホイールで横ズーム、修飾なしで横スクロール、Shift で縦スクロール"""
+        modifiers = event.modifiers()
+        if modifiers & Qt.KeyboardModifier.ShiftModifier:
             super().wheelEvent(event)
             return
-        notches = event.angleDelta().y() / 120.0
-        if notches == 0:
+        if modifiers & Qt.KeyboardModifier.ControlModifier:
+            notches = event.angleDelta().y() / 120.0
+            if notches == 0:
+                super().wheelEvent(event)
+                return
+            cursor_x = event.position().x()
+            frame = self._frame_at(cursor_x)
+            # ズーム前のカーソル位置(ビューポート座標)を保ったままスクロールし直す
+            viewport_x = cursor_x - self._scroll_x
+            self._zoom(ZOOM_STEP**notches)
+            self.scroll_requested.emit(int(self._x(frame) - viewport_x))
+            event.accept()
+            return
+        # 横向きのホイールを持つデバイスでは x 側だけが動く
+        delta = event.angleDelta().y() or event.angleDelta().x()
+        if delta == 0:
             super().wheelEvent(event)
             return
-        cursor_x = event.position().x()
-        frame = self._frame_at(cursor_x)
-        # ズーム前のカーソル位置(ビューポート座標)を保ったままスクロールし直す
-        viewport_x = cursor_x - self._scroll_x
-        self._zoom(ZOOM_STEP**notches)
-        self.scroll_requested.emit(int(self._x(frame) - viewport_x))
+        # 上回転(正)で左へ進めるため符号を反転する
+        self.hscroll_requested.emit(-delta)
         event.accept()
 
     # --- 描画 ---
@@ -270,37 +309,66 @@ class TimelineArea(QWidget):
         rect = QRectF(event.rect())
         painter.fillRect(rect, _BG)
         self._paint_rows(painter, rect)
+        self._paint_grid(painter, rect)
+        self._paint_bars(painter, rect)
         self._paint_ruler(painter, rect)
         self._paint_playhead(painter)
         self._paint_labels(painter)
         painter.end()
 
+    RULER_MAJOR_TICK = 5  # 主目盛りの線の長さ (px)
+    RULER_MINOR_TICK = 3  # 副目盛りの線の長さ (px)
+
     def _paint_ruler(self, painter: QPainter, rect: QRectF) -> None:
-        """上端のルーラーに目盛りとフレーム番号を描く"""
+        """上端のルーラーに主副の目盛りとフレーム番号を描く"""
         painter.fillRect(QRectF(rect.left(), 0, rect.width(), RULER_H), _RULER_BG)
-        step = _tick_interval(self._px_per_frame)
-        first = max(0, self._frame_at(rect.left()) // step * step)
+        major = _tick_interval(self._px_per_frame)
+        minor = _minor_interval(major, self._px_per_frame)
+        first = max(0, self._frame_at(rect.left()) // minor * minor)
         last = self._frame_at(rect.right())
         painter.setPen(_TICK_COLOR)
-        for frame in range(first, last + 1, step):
-            x = self._x(frame)
-            painter.drawLine(int(x), RULER_H - 5, int(x), RULER_H)
-            painter.drawText(int(x) + 2, RULER_H - 7, str(frame))
+        for frame in range(first, last + 1, minor):
+            x = int(self._x(frame))
+            is_major = frame % major == 0
+            length = self.RULER_MAJOR_TICK if is_major else self.RULER_MINOR_TICK
+            painter.drawLine(x, RULER_H - length, x, RULER_H)
+            if is_major:
+                painter.drawText(x + 2, RULER_H - 7, str(frame))
 
     def _paint_rows(self, painter: QPainter, rect: QRectF) -> None:
-        """各行の背景と、可視フレーム範囲に掛かる区間バーを描く
+        """各行の背景を描く"""
+        for i in range(len(self._rows)):
+            painter.fillRect(
+                QRectF(rect.left(), self._row_top(i), rect.width(), ROW_H), _ROW_BG
+            )
+
+    def _paint_grid(self, painter: QPainter, rect: QRectF) -> None:
+        """行エリアに縦線を引く(主目盛りは明るく、副目盛りは暗く)
+
+        行背景の後・区間バーの前に描き、バーが線に埋もれないようにする。
+        """
+        bottom = self._row_top(len(self._rows))
+        if bottom <= RULER_H + ROW_GAP:
+            return
+        major = _tick_interval(self._px_per_frame)
+        minor = _minor_interval(major, self._px_per_frame)
+        first = max(0, self._frame_at(rect.left()) // minor * minor)
+        last = self._frame_at(rect.right())
+        for frame in range(first, last + 1, minor):
+            painter.setPen(_GRID_MAJOR if frame % major == 0 else _GRID_MINOR)
+            x = int(self._x(frame))
+            painter.drawLine(x, int(RULER_H), x, int(bottom))
+
+    def _paint_bars(self, painter: QPainter, rect: QRectF) -> None:
+        """可視フレーム範囲に掛かる区間バーを描く
 
         自動検出はフレームごとの区間で数千個になり得るため、
         描画対象を可視範囲に掛かるバーだけへ絞る。
         """
         left_frame = self._frame_at_raw(rect.left()) - 1
         right_frame = self._frame_at_raw(rect.right()) + 1
+        painter.setPen(Qt.PenStyle.NoPen)
         for i, row in enumerate(self._rows):
-            top = self._row_top(i)
-            painter.fillRect(
-                QRectF(rect.left(), top, rect.width(), ROW_H), _ROW_BG
-            )
-            painter.setPen(Qt.PenStyle.NoPen)
             for vr in row.items:
                 if vr.end < left_frame or vr.start > right_frame:
                     continue
@@ -348,6 +416,7 @@ class TimelineWindow(QWidget):
     interval_edited = Signal(object, int, int)
     region_clicked = Signal(object, int)
     delete_requested = Signal(object)
+    playback_toggle_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -378,6 +447,8 @@ class TimelineWindow(QWidget):
         self._area.region_clicked.connect(self.region_clicked)
         self._area.delete_requested.connect(self.delete_requested)
         self._area.scroll_requested.connect(self._scroll_to)
+        self._area.hscroll_requested.connect(self._scroll_by)
+        self._area.playback_toggle_requested.connect(self.playback_toggle_requested)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._scroll)
@@ -385,6 +456,11 @@ class TimelineWindow(QWidget):
     def _scroll_to(self, x: int) -> None:
         """ズームのアンカー補正(カーソル下のフレームを画面上に留める)"""
         self._scroll.horizontalScrollBar().setValue(x)
+
+    def _scroll_by(self, delta: int) -> None:
+        """ホイールによる横スクロール(現在位置からの相対移動)"""
+        bar = self._scroll.horizontalScrollBar()
+        bar.setValue(bar.value() + delta)
 
     def set_total(self, total: int) -> None:
         self._area.set_total(total)

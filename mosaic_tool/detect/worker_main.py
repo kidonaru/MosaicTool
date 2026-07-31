@@ -15,6 +15,21 @@ from pathlib import Path
 # プロトコル(1 行 = 1 JSON 応答)に使う標準出力。reserve_protocol_stdout() で確保する
 _protocol_out = sys.stdout
 
+# torch のビルドに載っていない GPU で推論したときの CUDA エラー
+_NO_KERNEL_IMAGE = "no kernel image is available"
+_NO_KERNEL_IMAGE_HINT = (
+    "この GPU に対応していない torch が入っています。"
+    "自動検出ウィンドウの「再セットアップ」からやり直してください。"
+)
+
+
+def error_message(e: Exception) -> str:
+    """例外を利用者向けのメッセージへ整える(原因が分かるものは対処も添える)"""
+    detail = f"{type(e).__name__}: {e}"
+    if _NO_KERNEL_IMAGE in str(e):
+        return f"{_NO_KERNEL_IMAGE_HINT}\n\n{detail}"
+    return detail
+
 
 def reserve_protocol_stdout() -> None:
     """応答用に本物の標準出力を確保し、それ以外の出力を標準エラーへ逃がす
@@ -123,7 +138,7 @@ def handle_request(models: list[tuple], line: str, emit) -> dict:
         )
         return {"ok": True, "detections": detections}
     except Exception as e:
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        return {"ok": False, "error": error_message(e)}
 
 
 def _emit(payload: dict) -> None:

@@ -4,8 +4,8 @@ import os
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QRectF, QSettings, Qt
-from PySide6.QtGui import QKeySequence
+from PySide6.QtCore import QProcess, QRectF, QSettings, Qt
+from PySide6.QtGui import QImage, QKeySequence
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import (  # noqa: E402
@@ -19,7 +19,10 @@ from PIL import Image  # noqa: E402
 from mosaic_tool.app import PEN_STEP, THRESHOLD_STEP, MainWindow  # noqa: E402
 from mosaic_tool.regions import Region, RegionKind  # noqa: E402
 from mosaic_tool.settings import AppSettings  # noqa: E402
+from mosaic_tool.video import ffmpeg as video_ffmpeg  # noqa: E402
 from mosaic_tool.video.ffmpeg import VideoInfo  # noqa: E402
+from mosaic_tool.video.frame_fetcher import FrameFetcher  # noqa: E402
+from mosaic_tool.video.scrubber import Scrubber  # noqa: E402
 from mosaic_tool.video.session import VideoRegion  # noqa: E402
 
 
@@ -440,6 +443,47 @@ def test_setup_is_not_shown_when_the_runtime_is_ready(window, monkeypatch):
     window._detect_window.close()
 
 
+class SyncFrameFetcher(FrameFetcher):
+    """テストを決定的にするため、要求を同じスレッドで即座に処理するフェッチャー"""
+
+    def start(self):  # スレッドは立てない
+        pass
+
+    def request(self, frame):
+        try:
+            data = video_ffmpeg.extract_frame(self._path, frame, self._info)
+        except video_ffmpeg.VideoError as e:
+            self.failed.emit(frame, str(e))
+            return
+        self.frame_ready.emit(frame, data)
+
+
+class SyncScrubber(Scrubber):
+    """テストを決定的にするため、プロキシフレームを同じスレッドで即座に返す"""
+
+    def start(self):  # スレッドは立てない
+        pass
+
+    def request(self, frame):
+        width, height = self._size
+        image = QImage(width, height, QImage.Format.Format_RGB888)
+        image.fill(0)
+        self.frame_ready.emit(frame, image)
+
+
+class InstantSettleTimer:
+    """シーク静定のデバウンスを即時発火させるタイマーの代役"""
+
+    def __init__(self, fire):
+        self._fire = fire
+
+    def start(self):
+        self._fire()
+
+    def stop(self):
+        pass
+
+
 @pytest.fixture
 def video(window, monkeypatch, tmp_path):
     """ffmpeg をモックして動画モードへ入れる"""
@@ -453,6 +497,11 @@ def video(window, monkeypatch, tmp_path):
     monkeypatch.setattr(
         "mosaic_tool.app.video_ffmpeg.extract_frame",
         lambda *a, **k: buf.getvalue(),
+    )
+    monkeypatch.setattr("mosaic_tool.app.FrameFetcher", SyncFrameFetcher)
+    monkeypatch.setattr("mosaic_tool.app.Scrubber", SyncScrubber)
+    monkeypatch.setattr(
+        window, "_settle_timer", InstantSettleTimer(window._on_seek_settled)
     )
     path = tmp_path / "movie.mp4"
     path.write_bytes(b"")
@@ -551,3 +600,235 @@ class TestTimelineWindowIntegration:
     def test_window_shows_all_intervals(self, video):
         video.canvas.add_region(_rect_region())
         assert len(video._timeline_window._area._rows) == 1
+
+
+class TestVideoDetectRange:
+    @pytest.fixture
+    def captured(self, video, monkeypatch):
+        """検出範囲ダイアログを OK 固定にし、ffmpeg の起動引数を捕まえる"""
+        calls = {}
+
+        class FakeDialog:
+            def __init__(self, total_frames, fps, current_frame, step, parent=None):
+                calls["args"] = (total_frames, fps, current_frame, step)
+
+            def exec(self):
+                return QDialog.DialogCode.Accepted
+
+            def range_result(self):
+                return calls.get("result", (10, 39, 5))
+
+        monkeypatch.setattr("mosaic_tool.app.DetectRangeDialog", FakeDialog)
+        monkeypatch.setattr(
+            "mosaic_tool.app.QProcess.start",
+            lambda self, program, args: calls.setdefault("cmd", [program, *args]),
+        )
+        return calls
+
+    def test_dialog_receives_the_current_frame_and_video_info(self, video, captured):
+        video._timeline.seek(40)
+        video._start_video_detect({"m.pt": {"conf": 0.5, "classes": []}})
+        assert captured["args"] == (100, 30.0, 40, 1)
+        video._cleanup_video_detect()
+
+    def test_extraction_uses_the_selected_range(self, video, captured):
+        video._start_video_detect({"m.pt": {"conf": 0.5, "classes": []}})
+        cmd = captured["cmd"]
+        # 開始 10 / 終了 39 / 間隔 5 なので 6 枚
+        assert cmd[cmd.index("-frames:v") + 1] == "6"
+        # -ss は小数 6 桁で書き出すため、絶対誤差で比べる
+        assert float(cmd[cmd.index("-ss") + 1]) == pytest.approx(9.5 / 30.0, abs=1e-6)
+        assert video._video_detect.start == 10
+        assert video._video_detect.end == 39
+        video._cleanup_video_detect()
+
+    def test_cancelling_the_dialog_does_not_extract(self, video, monkeypatch):
+        class FakeDialog:
+            def __init__(self, *a, **k):
+                pass
+
+            def exec(self):
+                return QDialog.DialogCode.Rejected
+
+        monkeypatch.setattr("mosaic_tool.app.DetectRangeDialog", FakeDialog)
+        monkeypatch.setattr(
+            "mosaic_tool.app.QProcess.start",
+            lambda *a: pytest.fail("展開が始まった"),
+        )
+        video._start_video_detect({"m.pt": {"conf": 0.5, "classes": []}})
+        assert video._video_detect is None
+
+    def test_the_step_is_kept_for_the_next_run(self, video, captured):
+        video._start_video_detect({"m.pt": {"conf": 0.5, "classes": []}})
+        video._cleanup_video_detect()
+        assert video._detect_step == 5
+
+    def test_detected_frames_are_offset_by_the_start(self, video, captured):
+        video._start_video_detect({"m.pt": {"conf": 0.5, "classes": []}})
+        state = video._video_detect
+        # 最後の 1 枚として扱い、その場で区間のマージまで進める
+        state.files = [Path(f"f{i}.jpg") for i in range(3)]
+        state.idx = 2
+        video._on_video_frame_detected(
+            [{"bbox": [0, 0, 10, 10]}]
+        )
+        # 開始 10 + 2 枚目 × 間隔 5 = フレーム 20
+        assert video._video.regions[0].start == 20
+        video._cleanup_video_detect()
+
+    def test_missing_ffmpeg_is_reported_before_extraction(self, video, monkeypatch):
+        """ffmpeg が消えていたら起動を試みずに知らせること
+
+        起動できなかった QProcess は finished を出さないため、そのまま走らせると
+        「モデルを読み込み中...」のまま固まる。
+        """
+        monkeypatch.setattr(
+            "mosaic_tool.app.video_ffmpeg.is_ffmpeg_ready", lambda: False
+        )
+        monkeypatch.setattr(
+            "mosaic_tool.app.QProcess.start", lambda *a: pytest.fail("展開が始まった")
+        )
+        shown = {}
+        monkeypatch.setattr(
+            QMessageBox, "critical", lambda *a, **k: shown.setdefault("text", a[2])
+        )
+        video._start_video_detect({"m.pt": {"conf": 0.5, "classes": []}})
+        assert video._video_detect is None
+        assert "ffmpeg" in shown["text"]
+
+    def test_extraction_that_fails_to_start_is_reported(self, video, captured, monkeypatch):
+        """起動失敗では finished が来ないため errorOccurred で畳むこと"""
+        shown = {}
+        monkeypatch.setattr(
+            QMessageBox, "critical", lambda *a, **k: shown.setdefault("text", a[2])
+        )
+        video._start_video_detect({"m.pt": {"conf": 0.5, "classes": []}})
+        video._video_detect.proc.errorOccurred.emit(
+            QProcess.ProcessError.FailedToStart
+        )
+        assert video._video_detect is None
+        assert "開始できませんでした" in shown["text"]
+
+    def test_crashed_extraction_is_not_reported_as_a_start_failure(
+        self, video, captured, monkeypatch
+    ):
+        """起動後の異常は「開始できなかった」ではないため文言を分ける"""
+        shown = {}
+        monkeypatch.setattr(
+            QMessageBox, "critical", lambda *a, **k: shown.setdefault("text", a[2])
+        )
+        video._start_video_detect({"m.pt": {"conf": 0.5, "classes": []}})
+        video._video_detect.proc.errorOccurred.emit(QProcess.ProcessError.Crashed)
+        assert video._video_detect is None
+        assert "開始できませんでした" not in shown["text"]
+
+    def test_intervals_are_clamped_to_the_range_end(self, video, captured):
+        captured["result"] = (10, 22, 5)
+        video._start_video_detect({"m.pt": {"conf": 0.5, "classes": []}})
+        state = video._video_detect
+        state.files = [Path(f"f{i}.jpg") for i in range(3)]
+        state.idx = 2  # フレーム 20。間隔 5 なら本来 24 まで伸びる
+        video._on_video_frame_detected([{"bbox": [0, 0, 10, 10]}])
+        assert video._video.regions[0].end == 22
+        video._cleanup_video_detect()
+
+
+class TestPlayback:
+    @pytest.fixture
+    def player(self, video, monkeypatch):
+        """VideoPlayer を差し替えて再生の配線だけを見る
+
+        app 側が frame_ready 等へ接続するため、シグナルは本物と同じ定義を持たせる。
+        """
+        from PySide6.QtCore import QObject, Signal
+        from PySide6.QtGui import QImage
+
+        events = []
+
+        class FakePlayer(QObject):
+            frame_ready = Signal(int, QImage)
+            finished = Signal()
+            failed = Signal(str)
+
+            def __init__(self, path, info, parent=None):
+                super().__init__(parent)
+                self.started: list[int] = []
+                self.stopped = 0
+                self.speed = 1.0
+                self._playing = False
+                events.append(self)
+
+            def is_playing(self):
+                return self._playing
+
+            def start(self, frame):
+                self.started.append(frame)
+                self._playing = True
+
+            def stop(self):
+                self.stopped += 1
+                self._playing = False
+
+            def set_speed(self, speed):
+                self.speed = speed
+
+        monkeypatch.setattr("mosaic_tool.app.VideoPlayer", FakePlayer)
+        return events
+
+    def test_play_button_starts_from_the_current_frame(self, video, player):
+        video._timeline.seek(20)
+        video._timeline.play_clicked.emit()
+        assert player[0].started == [20]
+
+    def test_play_button_stops_while_playing(self, video, player):
+        video._timeline.play_clicked.emit()
+        video._timeline.play_clicked.emit()
+        assert player[0].stopped >= 1
+        assert not video._player.is_playing()
+
+    def test_button_text_follows_the_state(self, video, player):
+        from mosaic_tool.video.timeline import PAUSE_TEXT, PLAY_TEXT
+
+        video._timeline.play_clicked.emit()
+        assert video._timeline._play_btn.text() == PAUSE_TEXT
+        video._timeline.play_clicked.emit()
+        assert video._timeline._play_btn.text() == PLAY_TEXT
+
+    def test_speed_change_is_forwarded(self, video, player):
+        video._timeline.play_clicked.emit()
+        video._timeline._speed_combo.setCurrentIndex(0)
+        assert player[0].speed == 0.25
+
+    def test_timeline_window_space_toggles_playback(self, video, player):
+        video._timeline_window.playback_toggle_requested.emit()
+        assert player[0].started == [0]
+
+    def test_playback_stops_before_detect(self, video, player, monkeypatch):
+        class FakeDialog:
+            def __init__(self, *a, **k):
+                pass
+
+            def exec(self):
+                return QDialog.DialogCode.Rejected
+
+        monkeypatch.setattr("mosaic_tool.app.DetectRangeDialog", FakeDialog)
+        video._timeline.play_clicked.emit()
+        video._start_video_detect({"m.pt": {"conf": 0.5, "classes": []}})
+        assert not video._player.is_playing()
+
+    def test_playback_stops_when_leaving_video_mode(self, video, player):
+        video._timeline.play_clicked.emit()
+        video._leave_video_mode()
+        assert player[0].stopped >= 1
+        assert video._player is None
+
+    def test_frame_ready_updates_the_state(self, video, player):
+        from PySide6.QtGui import QImage
+
+        image = QImage(32, 24, QImage.Format.Format_RGB888)
+        image.fill(0)
+        video._timeline.play_clicked.emit()
+        video._on_playback_frame(15, image)
+        assert video._video.frame == 15
+        assert video._timeline.frame() == 15
+        assert video._timeline_window._area._frame == 15

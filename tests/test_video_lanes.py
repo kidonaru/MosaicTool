@@ -29,8 +29,18 @@ class TestPackLanes:
         assert pack_lanes([(0, 5), (5, 10)]) == [[0], [1]]
 
     def test_lane_reused_after_gap(self):
-        # 最も早く終わったレーン(この場合 lane1)が再利用される
-        assert pack_lanes([(0, 10), (5, 8), (20, 30)]) == [[0], [1, 2]]
+        # 空いているレーンのうち最上段(lane0)が再利用される
+        assert pack_lanes([(0, 10), (5, 8), (20, 30)]) == [[0, 2], [1]]
+
+    def test_chain_stays_on_top_lane(self):
+        # 序盤の同時検出でレーンが増えても、その後の重ならないチェーンは
+        # 下のレーンへ散らばらず最上段に詰まる(タイムラインの千鳥配置の退行防止)
+        intervals = [(f, f + 9) for f in range(0, 30, 10) for _ in range(4)]
+        intervals += [(f, f + 9) for f in range(30, 130, 10)]
+        lanes = pack_lanes(intervals)
+        assert len(lanes) == 4
+        # チェーン部分(index 12 以降)はすべて lane0 に載る
+        assert [i for i in lanes[0] if i >= 12] == list(range(12, len(intervals)))
 
     def test_lane_items_sorted_by_start(self):
         # 入力が開始順でなくても、レーン内は開始フレーム順に並ぶ

@@ -151,6 +151,45 @@ class TestWheel:
         # カーソル下のフレーム 50 が同じ見かけ位置に残るスクロール量を要求する
         assert fired == [int(area._x(50) - x)]
 
+    def test_plain_wheel_scrolls_horizontally(self):
+        area = make_area()
+        fired = []
+        area.hscroll_requested.connect(fired.append)
+        self._wheel(area, area._x(10), 1, Qt.KeyboardModifier.NoModifier)
+        # ホイール上回転で左へ(加算量は負)
+        assert fired == [-120]
+
+    def test_wheel_down_scrolls_right(self):
+        area = make_area()
+        fired = []
+        area.hscroll_requested.connect(fired.append)
+        self._wheel(area, area._x(10), -1, Qt.KeyboardModifier.NoModifier)
+        assert fired == [120]
+
+    def test_ctrl_wheel_does_not_scroll_horizontally(self):
+        area = make_area()
+        fired = []
+        area.hscroll_requested.connect(fired.append)
+        self._wheel(area, area._x(10), 1, Qt.KeyboardModifier.ControlModifier)
+        assert fired == []
+
+    def test_shift_wheel_does_not_scroll_horizontally(self):
+        area = make_area()
+        fired = []
+        area.hscroll_requested.connect(fired.append)
+        self._wheel(area, area._x(10), 1, Qt.KeyboardModifier.ShiftModifier)
+        assert fired == []
+
+    def test_window_applies_the_relative_scroll(self):
+        window = TimelineWindow()
+        window.set_total(10000)
+        # スクロールバーの可動域はレイアウト後に決まるため一度表示する
+        window.show()
+        bar = window._scroll.horizontalScrollBar()
+        bar.setValue(300)
+        window._area.hscroll_requested.emit(120)
+        assert bar.value() == 420
+
 
 class TestRows:
     def test_set_data_builds_rows(self):
@@ -354,3 +393,59 @@ class TestDelete:
             )
         )
         assert fired == []
+
+
+class TestMinorInterval:
+    def test_divides_by_ten_when_there_is_room(self):
+        from mosaic_tool.video.timeline_window import _minor_interval
+
+        # 主目盛り 100 フレーム、1 フレーム 2px なら 1/10 (10 フレーム = 20px) が入る
+        assert _minor_interval(100, 2.0) == 10
+
+    def test_falls_back_to_a_coarser_division(self):
+        from mosaic_tool.video.timeline_window import _minor_interval
+
+        # 1/10 では 8px を割るので 1/5 (20 フレーム = 10px) を選ぶ
+        assert _minor_interval(100, 0.5) == 20
+
+    def test_returns_the_major_interval_when_it_cannot_divide(self):
+        from mosaic_tool.video.timeline_window import _minor_interval
+
+        assert _minor_interval(1, 20.0) == 1
+
+    def test_returns_the_major_interval_when_there_is_no_room(self):
+        from mosaic_tool.video.timeline_window import _minor_interval
+
+        assert _minor_interval(100, 0.05) == 100
+
+
+class TestGridRendering:
+    def test_paints_without_error(self):
+        # 縦線を含む描画一式が例外なく通ることを確認する(見た目は目視で確認する)
+        from PySide6.QtGui import QPixmap
+
+        area = make_area()
+        area.set_data([vr(0, 10)], None)
+        area.resize(400, 120)
+        pixmap = QPixmap(400, 120)
+        area.render(pixmap)
+
+    def test_grid_is_drawn_above_the_row_background(self):
+        # 行が無いときは縦線を描かない(下端が RULER_H + ROW_GAP と同じになる)
+        from mosaic_tool.video.timeline_window import ROW_GAP
+
+        area = make_area()
+        area.set_data([], None)
+        assert area._row_top(0) == RULER_H + ROW_GAP
+
+
+def test_space_requests_playback_toggle():
+    area = make_area()
+    fired = []
+    area.playback_toggle_requested.connect(lambda: fired.append(True))
+    area.keyPressEvent(
+        QKeyEvent(
+            QKeyEvent.Type.KeyPress, Qt.Key.Key_Space, Qt.KeyboardModifier.NoModifier
+        )
+    )
+    assert fired == [True]

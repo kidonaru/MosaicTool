@@ -9,10 +9,8 @@ from mosaic_tool.video.setup_dialog import install_from_zip, planned_downloads
 
 @pytest.fixture
 def runtime(tmp_path, monkeypatch):
-    """runtime/ffmpeg の配置先をテスト用ディレクトリへ向ける"""
-    monkeypatch.setattr(
-        "mosaic_tool.video.ffmpeg.runtime_dir", lambda: tmp_path / "runtime"
-    )
+    """ffmpeg の配置先をテスト用ディレクトリへ向ける"""
+    monkeypatch.setattr("mosaic_tool.video.ffmpeg.base_dir", lambda: tmp_path)
     return tmp_path
 
 
