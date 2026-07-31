@@ -53,8 +53,9 @@ def planned_downloads() -> tuple[_Download, ...]:
     if sys.platform == "win32":
         return (
             _Download(
-                "https://www.gyan.dev/ffmpeg/builds/packages/"
-                "ffmpeg-8.1.2-essentials_build.zip",
+                # gyan.dev 本体は CDN がなく遅いため、同作者の GitHub ミラーから取る
+                "https://github.com/GyanD/codexffmpeg/releases/download/"
+                "8.1.2/ffmpeg-8.1.2-essentials_build.zip",
                 ("ffmpeg.exe", "ffprobe.exe"),
                 "db580001caa24ac104c8cb856cd113a87b0a443f7bdf47d8c12b1d740584a2ec",
             ),
