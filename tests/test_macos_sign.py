@@ -24,23 +24,59 @@ def test_codesign_command_uses_hardened_runtime():
     assert cmd[-1] == "/a/b"
 
 
+_MACHO = b"\xcf\xfa\xed\xfe" + b"\x00" * 16
+
+
+def _write_macho(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(_MACHO)
+    return path
+
+
 def test_macho_targets_are_deepest_first(tmp_path):
     """入れ子のバイナリを内側から署名する(外側を先に署名すると壊れる)"""
     app = tmp_path / "MosaicTool.app"
-    inner = app / "Contents" / "Frameworks" / "sub" / "deep.dylib"
-    inner.parent.mkdir(parents=True)
-    inner.write_bytes(b"")
-    shallow = app / "Contents" / "Frameworks" / "lib.so"
-    shallow.write_bytes(b"")
-    exe = app / "Contents" / "MacOS" / "MosaicTool"
-    exe.parent.mkdir(parents=True)
-    exe.write_bytes(b"")
+    inner = _write_macho(app / "Contents" / "Frameworks" / "sub" / "deep.dylib")
+    shallow = _write_macho(app / "Contents" / "Frameworks" / "lib.so")
+    exe = _write_macho(app / "Contents" / "MacOS" / "MosaicTool")
 
     targets = macos_sign.macho_targets(app)
 
     assert targets[-1] == app          # バンドル本体は最後
     assert targets.index(inner) < targets.index(shallow)
     assert exe in targets
+
+
+def test_macho_targets_include_extensionless_binaries(tmp_path):
+    """拡張子の無い実行ファイル(uv など)も署名対象にする
+
+    署名から漏れると ad-hoc 署名のまま公証に出て Invalid になる。
+    """
+    app = tmp_path / "MosaicTool.app"
+    uv = _write_macho(app / "Contents" / "Frameworks" / "uv")
+    text = app / "Contents" / "Resources" / "readme.txt"
+    text.parent.mkdir(parents=True)
+    text.write_text("not a binary", encoding="utf-8")
+
+    targets = macos_sign.macho_targets(app)
+
+    assert uv in targets
+    assert text not in targets
+
+
+def test_macho_targets_sign_frameworks_as_bundles(tmp_path):
+    """framework は中の実行ファイルではなく Versions/A をまとめて署名する"""
+    app = tmp_path / "MosaicTool.app"
+    framework = app / "Contents" / "Frameworks" / "QtCore.framework"
+    binary = _write_macho(framework / "Versions" / "A" / "QtCore")
+    _write_macho(framework / "Versions" / "A" / "helper.dylib")
+
+    targets = macos_sign.macho_targets(app)
+
+    assert framework / "Versions" / "A" in targets
+    assert binary not in targets
+    # 同じ framework を二重に署名しない
+    assert len([p for p in targets if ".framework" in str(p)]) == 1
 
 
 def test_notary_credentials_requires_all_values(monkeypatch):
