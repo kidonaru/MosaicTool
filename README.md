@@ -69,6 +69,8 @@ xattr -dr com.apple.quarantine /path/to/MosaicTool.app
 
 YOLO 形式の検出モデルで、モザイク範囲を自動で追加できます。
 
+https://github.com/user-attachments/assets/ab840009-1e65-40d8-92dc-7a5ed2887b75
+
 1. ツールバーの「自動検出」(または `D` キー) を押すと自動検出ウィンドウが開きます
 2. 初回は「セットアップ」を押します。推論用の実行環境と、標準の検出モデル 2 件
    (顔・目 / 合計 約 13MB) がダウンロードされます
