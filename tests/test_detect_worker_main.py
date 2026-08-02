@@ -254,6 +254,33 @@ def test_protocol_output_is_isolated_from_library_prints(monkeypatch):
     assert "Ultralytics" in noise.getvalue()
 
 
+def test_force_utf8_stdio_reconfigures_locale_encoded_streams(monkeypatch):
+    """標準入出力を UTF-8 に固定すること
+
+    日本語 Windows では stdin/stdout が cp932 になり、全角を含む画像パスが
+    化けて FileNotFoundError になっていた。
+    """
+    streams = [
+        io.TextIOWrapper(io.BytesIO(), encoding="cp932") for _ in range(3)
+    ]
+    monkeypatch.setattr(sys, "stdin", streams[0])
+    monkeypatch.setattr(sys, "stdout", streams[1])
+    monkeypatch.setattr(sys, "stderr", streams[2])
+
+    worker_main.force_utf8_stdio()
+
+    assert [s.encoding for s in streams] == ["utf-8", "utf-8", "utf-8"]
+
+
+def test_force_utf8_stdio_tolerates_streams_without_reconfigure(monkeypatch):
+    """StringIO のような reconfigure を持たないストリームでも落ちないこと"""
+    monkeypatch.setattr(sys, "stdin", io.StringIO())
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+
+    worker_main.force_utf8_stdio()  # 例外が出なければよい
+
+
 def test_error_message_adds_hint_for_unsupported_gpu():
     """GPU 非対応の CUDA エラーには対処方法を添えること"""
     e = RuntimeError(

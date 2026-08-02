@@ -31,6 +31,19 @@ def error_message(e: Exception) -> str:
     return detail
 
 
+def force_utf8_stdio() -> None:
+    """標準入出力の文字コードを UTF-8 に固定する
+
+    呼び出し側は UTF-8 でやり取りするが、Windows ではロケール次第で
+    stdin/stdout が cp932 になる。全角を含む画像パスが往復で化けて
+    「存在するのに FileNotFoundError」になるため、読み書きの前に揃える。
+    """
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def reserve_protocol_stdout() -> None:
     """応答用に本物の標準出力を確保し、それ以外の出力を標準エラーへ逃がす
 
@@ -146,7 +159,8 @@ def _emit(payload: dict) -> None:
 
 
 def main(argv: list[str]) -> int:
-    # ultralytics を読み込む前に、応答用の標準出力を確保する
+    # ultralytics を読み込む前に、文字コードと応答用の標準出力を確保する
+    force_utf8_stdio()
     reserve_protocol_stdout()
     model_paths = argv[1:]
     if not model_paths:
